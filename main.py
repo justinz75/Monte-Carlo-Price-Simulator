@@ -59,3 +59,36 @@ plt.title("Monte Carlo Stock Price Simulation - 50 of 10,000 Paths")
 plt.grid(True, alpha=0.3)
 plt.tight_layout()
 plt.show()
+
+
+def price_european_call(S0, K, r, sigma, T, n_paths=10_000, seed=50):
+    """Price a European call option using Monte Carlo simulation"""
+    rng = np.random.default_rng(seed)
+    
+    #simulate terminal stock prices
+    S = rng.standard_normal(n_paths)
+    ST = S0*np.exp((r - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * S)
+    payoffs = np.maximum(ST - K, 0)
+    price = np.exp(-r * T) * payoffs.mean()
+    
+    #standard error of the estimate
+    std_error = np.exp(-r * T) * payoffs.std() / np.sqrt(n_paths)
+    
+    return price, std_error
+
+#parameters for the European call option
+S0, K, r, sigma, T = 100, 110, 0.05, 0.2, 1.0
+
+mc_price, mc_std_error = price_european_call(S0, K, r, sigma, T)
+print(f"Monte Carlo Price: {mc_price:.4f}, Standard Error: {mc_std_error:.4f}")
+
+
+def black_scholes_call(S0, K, r, sigma, T):
+    """Exact Black-Scholes price for a European call."""
+    d1 = (np.log(S0 / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
+    return S0 * stats.norm.cdf(d1) - K * np.exp(-r * T) * stats.norm.cdf(d2)
+
+bs_price = black_scholes_call(S0, K, r, sigma, T)
+print(f"Black-Scholes price: £{bs_price:.4f}")
+print(f"MC error: £{abs(mc_price - bs_price):.4f}")
