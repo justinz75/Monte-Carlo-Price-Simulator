@@ -11,7 +11,7 @@ print(z)
 
 #draw from N(mu, sigma^2)
 mu, sigma = 0.05, 0.2
-returns = rng.normal(loc=mu, scale=sigma, size=10_000)
+returns = rng.normal(mu, sigma, 10_000)
 print(f"Mean: {returns.mean():.4f}, Std: {returns.std():.4f}")
 
 #uniform random numbers on [0, 1)
@@ -61,7 +61,7 @@ plt.tight_layout()
 plt.show()
 
 
-def price_european_call(S0, K, r, sigma, T, n_paths=10_000, seed=50):
+def european_call(S0, K, r, sigma, T, n_paths=10_000, seed=50):
     """Price a European call option using Monte Carlo simulation"""
     rng = np.random.default_rng(seed)
     
@@ -78,15 +78,18 @@ def price_european_call(S0, K, r, sigma, T, n_paths=10_000, seed=50):
 
 #parameters for the European call option
 S0, K, r, sigma, T = 100, 110, 0.05, 0.2, 1.0
-mc_price, mc_std_error = price_european_call(S0, K, r, sigma, T)
+mc_price, mc_std_error = european_call(S0, K, r, sigma, T)
 print(f"Monte Carlo Price: {mc_price:.4f}, Standard Error: {mc_std_error:.4f}")
 
 
 def black_scholes_call(S0, K, r, sigma, T):
     """Exact Black-Scholes price for a European call."""
+    sqrt_T = np.sqrt(T)
+    discount = np.exp(-r * T)
     d1 = (np.log(S0 / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-    d2 = d1 - sigma * np.sqrt(T)
-    return S0 * stats.norm.cdf(d1) - K * np.exp(-r * T) * stats.norm.cdf(d2)
+    d2 = d1 - sigma * sqrt_T
+    call_value = S0 * stats.norm.cdf(d1) - K * discount * stats.norm.cdf(d2)
+    return call_value
 
 #parameters for the Black-Scholes price
 bs_price = black_scholes_call(S0, K, r, sigma, T)
@@ -109,8 +112,9 @@ def asian_call(S0, K, r, sigma, T, n_steps=252, n_paths=100_000, seed=50):
     avg_prices = paths.mean(axis=0)
     
     payoffs = np.maximum(avg_prices - K, 0)
-    price = np.exp(-r * T) * payoffs.mean()
-    se = np.exp(-r * T) * payoffs.std() / np.sqrt(n_paths)
+    discount = np.exp(-r * T)
+    price = discount * np.mean(payoffs)
+    se = discount * np.std(payoffs) / np.sqrt(len(payoffs))
     
     return price, se
 
@@ -135,12 +139,12 @@ def up_and_out_call(S0, K, B, r, sigma, T, n_steps=252, n_paths=100_000, seed=50
     
     #terminal payoff, zeroed out for knocked-out paths
     ST = paths[-1]
-    payoffs = np.maximum(ST - K, 0)
-    payoffs[knocked_out] = 0.0
+    payoffs = np.where(knocked_out, 0, np.maximum(ST - K, 0))
     
     #discounted expected payoff and standard error
-    price = np.exp(-r * T) * payoffs.mean()
-    se = np.exp(-r * T) * payoffs.std() / np.sqrt(n_paths)
+    discount = np.exp(-r * T)
+    price = discount * payoffs.mean()
+    se = discount * payoffs.std() / np.sqrt(n_paths)
     
     return price, se
 
@@ -185,3 +189,128 @@ plt.legend()
 plt.grid(True, alpha=0.3)
 plt.tight_layout()
 plt.show()
+
+def simulate_correlated_portfolio(S0_vec, mu_vec, sigma_vec, corr_matrix, T, dt, n_paths=10_000, seed=50):
+    """Simulate correlated GBM paths for multiple assets."""
+    rng = np.random.default_rng(seed)
+    n_assets = len(S0_vec)
+    n_steps = int(T / dt)
+    
+    #build the covariance matrix from the correlation matrix and standard deviations
+    D = np.diag(sigma_vec)
+    cov_matrix = D @ corr_matrix @ D
+    
+    #cholesky decomposition to get lower triangular matrix for correlation
+    L = np.linalg.cholesky(cov_matrix)
+    
+    #generate independent standard normal random variables and apply the correlation
+    Z_indep = rng.standard_normal((n_steps, n_paths, n_assets))
+    Z_corr = Z_indep @ L.T  # (n_steps, n_paths, n_assets)
+    
+    #simulate each asset
+    drift = (mu_vec - 0.5 * sigma_vec**2) * dt
+    diffusion = np.sqrt(dt) * Z_corr
+    log_returns = drift + diffusion
+    log_paths = np.cumsum(log_returns, axis=0)
+    paths = S0_vec * np.exp(log_paths)
+    
+    return paths
+
+#3 correlated assets
+portfolio_S0 = np.array([100, 50, 200])
+portfolio_mu = np.array([0.08, 0.06, 0.10])
+portfolio_sigma = np.array([0.20, 0.15, 0.30])
+corr = np.array([
+    [1.0, 0.5, 0.3],
+    [0.5, 1.0, 0.2],
+    [0.3, 0.2, 1.0]
+])
+weights = np.array([0.4, 0.3, 0.3])
+
+paths = simulate_correlated_portfolio(
+    portfolio_S0,
+    portfolio_mu,
+    portfolio_sigma,
+    corr,
+    T=1.0,
+    dt=1/252,
+)
+print(f"Shape: {paths.shape}")  #(252, 10000, 3)
+
+#portfolio value paths
+initial_investment = 100_000
+shares = (weights * initial_investment) / portfolio_S0
+portfolio_paths = paths @ shares  #(252, 10000)
+
+#compute terminal portfolio values and P&L
+terminal_values = portfolio_paths[-1]
+pnl = terminal_values - initial_investment
+
+var_99 = -np.percentile(pnl, 1)
+cvar_99 = -pnl[pnl <= -var_99].mean()
+
+print(f"Portfolio 99% 1-year VaR:  £{var_99:,.2f}")
+print(f"Portfolio 99% 1-year CVaR: £{cvar_99:,.2f}")
+print(f"Mean return: {pnl.mean() / initial_investment:.2%}")
+
+def call_antithetic(S0, K, r, sigma, T, n_paths=50_000, seed=50):
+    """European call with antithetic variance reduction."""
+    rng = np.random.default_rng(seed)
+    
+    Z = rng.standard_normal(n_paths)
+    
+    #simulate terminal stock prices for both the original and antithetic paths
+    common_part = (r - 0.5 * sigma**2) * T
+    volatility_part = sigma * np.sqrt(T)
+    terminal_prices = S0 * np.exp(
+    common_part + volatility_part * np.array([Z, -Z]))
+    ST_pos, ST_neg = terminal_prices
+    
+    #calculate payoffs for the original and antithetic paths
+    payoff_pos = np.maximum(ST_pos - K, 0)
+    payoff_neg = np.maximum(ST_neg - K, 0)
+    
+    #average the payoffs from the original and antithetic paths
+    paired_payoffs = 0.5 * (payoff_pos + payoff_neg)
+    price = np.exp(-r * T) * paired_payoffs.mean()
+    se = np.exp(-r * T) * paired_payoffs.std() / np.sqrt(n_paths)
+    
+    return price, se
+
+#compare standard Monte Carlo and antithetic variates for European call option pricing
+std_price, std_se = european_call(S0, K, r, sigma, T, n_paths=100_000)
+anti_price, anti_se = call_antithetic(S0, K, r, sigma, T, n_paths=50_000)
+
+print(f"Standard MC:  £{std_price:.4f} (SE: {std_se:.4f})")
+print(f"Antithetic:   £{anti_price:.4f} (SE: {anti_se:.4f})")
+print(f"SE reduction:  {(1 - anti_se/std_se):.1%}")
+
+def call_control_variate(S0, K, r, sigma, T, n_paths=100_000, seed=50):
+    """European call with control variate variance reduction."""
+    rng = np.random.default_rng(seed)
+    
+    Z = rng.standard_normal(n_paths)
+    ST = S0 * np.exp((r - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * Z)
+    
+    payoffs = np.maximum(ST - K, 0)
+    discount = np.exp(-r * T)
+    
+    #control variate: terminal stock price ST
+    #known expected value of ST under risk-neutral measure
+    expected_ST = S0 * np.exp(r * T)
+    
+    #estimate the covariance between payoffs and ST to compute beta
+    cov_matrix = np.cov(payoffs, ST)
+    beta = cov_matrix[0, 1] / cov_matrix[1, 1]
+    
+    #adjust payoffs using the control variate
+    adjusted = payoffs - beta * (ST - expected_ST)
+    price = discount * adjusted.mean()
+    se = discount * adjusted.std() / np.sqrt(n_paths)
+    
+    return price, se
+
+#compare standard Monte Carlo and control variate for European call option pricing
+cv_price, cv_se = call_control_variate(S0, K, r, sigma, T)
+print(f"Control var:  £{cv_price:.4f} (SE: {cv_se:.4f})")
+print(f"SE reduction vs standard: {(1 - cv_se/std_se):.1%}")
