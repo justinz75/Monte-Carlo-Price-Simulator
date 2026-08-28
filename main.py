@@ -107,13 +107,13 @@ def asian_call(S0, K, r, sigma, T, n_steps=252, n_paths=100_000, seed=50):
     payoffs = np.maximum(avg_prices - K, 0)
     discount = np.exp(-r * T)
     price = discount * np.mean(payoffs)
-    se = discount * np.std(payoffs) / np.sqrt(len(payoffs))
+    standard_error = discount * np.std(payoffs) / np.sqrt(len(payoffs))
     
-    return price, se
+    return price, standard_error
 
 # #parameters for the Asian call option
-# asian_price, asian_se = asian_call(S0=100, K=105, r=0.05, sigma=0.25, T=1.0)
-# print(f"Asian call price: £{asian_price:.4f} (SE: {asian_se:.4f})")
+# asian_price, asian_standard_error = asian_call(S0=100, K=105, r=0.05, sigma=0.25, T=1.0)
+# print(f"Asian call price: £{asian_price:.4f} (Standard Error: {asian_standard_error:.4f})")
 
 def up_and_out_call(S0, K, B, r, sigma, T, n_steps=252, n_paths=100_000, seed=50):
     """Price an up-and-out barrier call option."""
@@ -133,13 +133,13 @@ def up_and_out_call(S0, K, B, r, sigma, T, n_steps=252, n_paths=100_000, seed=50
     
     discount = np.exp(-r * T)
     price = discount * payoffs.mean()
-    se = discount * payoffs.std() / np.sqrt(n_paths)
+    standard_error = discount * payoffs.std() / np.sqrt(n_paths)
     
-    return price, se
+    return price, standard_error
 
 # #parameters for the up-and-out barrier call option
-# barrier_price, barrier_se = up_and_out_call(S0=100, K=100, B=130, r=0.05, sigma=0.25, T=1.0)
-# print(f"Up-and-out call price: £{barrier_price:.4f} (SE: {barrier_se:.4f})")
+# barrier_price, barrier_standard_error = up_and_out_call(S0=100, K=100, B=130, r=0.05, sigma=0.25, T=1.0)
+# print(f"Up-and-out call price: £{barrier_price:.4f} (Standard Error: {barrier_standard_error:.4f})")
 
 def monte_carlo_var(S0, mu, sigma, T, confidence = 0.95, n_paths = 100_000, seed = 50):
     """Estimate Value at Risk (VaR) and Conditional Value at Risk (CVaR) using Monte Carlo simulation."""
@@ -175,7 +175,7 @@ def monte_carlo_var(S0, mu, sigma, T, confidence = 0.95, n_paths = 100_000, seed
 # plt.tight_layout()
 # plt.show()
 
-def simulate_correlated_portfolio(S0_vec, mu_vec, sigma_vec, corr_matrix, T, dt, n_paths=10_000, seed=50):
+def simulate_correlated_portfolio(S0_vec, mu_vec, sigma_vec, correlation_matrix, T, dt, n_paths=10_000, seed=50):
     """Simulate correlated GBM paths for multiple assets."""
     rng = np.random.default_rng(seed)
     n_assets = len(S0_vec)
@@ -183,10 +183,10 @@ def simulate_correlated_portfolio(S0_vec, mu_vec, sigma_vec, corr_matrix, T, dt,
     
     #build the covariance matrix from the correlation matrix and standard deviations
     D = np.diag(sigma_vec)
-    cov_matrix = D @ corr_matrix @ D
+    covariance_matrix = D @ correlation_matrix @ D
     
     #cholesky decomposition to get lower triangular matrix for correlation
-    L = np.linalg.cholesky(cov_matrix)
+    L = np.linalg.cholesky(covariance_matrix)
     
     Z_independent = rng.standard_normal((n_steps, n_paths, n_assets))
     Z_correlation = Z_independent @ L.T 
@@ -248,64 +248,64 @@ def call_antithetic(S0, K, r, sigma, T, n_paths=50_000, seed=50):
     volatility_part = sigma * np.sqrt(T)
     terminal_prices = S0 * np.exp(
     common_part + volatility_part * np.array([Z, -Z]))
-    ST_pos, ST_neg = terminal_prices
+    price_up, price_down = terminal_prices
     
     #calculate payoffs for the original and antithetic paths
-    payoff_pos = np.maximum(ST_pos - K, 0)
-    payoff_neg = np.maximum(ST_neg - K, 0)
+    payoff_pos = np.maximum(price_up - K, 0)
+    payoff_neg = np.maximum(price_down - K, 0)
     
     #average the payoffs from the original and antithetic paths
     paired_payoffs = 0.5 * (payoff_pos + payoff_neg)
     price = np.exp(-r * T) * paired_payoffs.mean()
-    se = np.exp(-r * T) * paired_payoffs.std() / np.sqrt(n_paths)
+    standard_error = np.exp(-r * T) * paired_payoffs.std() / np.sqrt(n_paths)
     
-    return price, se
+    return price, standard_error
 
 # #compare standard Monte Carlo and antithetic variates for European call option pricing
-# std_price, std_se = european_call(S0, K, r, sigma, T, n_paths=100_000)
-# anti_price, anti_se = call_antithetic(S0, K, r, sigma, T, n_paths=50_000)
+# std_price, std_standard_error = european_call(S0, K, r, sigma, T, n_paths=100_000)
+# anti_price, anti_standard_error = call_antithetic(S0, K, r, sigma, T, n_paths=50_000)
 
-# print(f"Standard MC:  £{std_price:.4f} (SE: {std_se:.4f})")
-# print(f"Antithetic:   £{anti_price:.4f} (SE: {anti_se:.4f})")
-# print(f"SE reduction:  {(1 - anti_se/std_se):.1%}")
+# print(f"Standard MC:  £{std_price:.4f} (Standard Error: {std_standard_error:.4f})")
+# print(f"Antithetic:   £{anti_price:.4f} (Standard Error: {anti_standard_error:.4f})")
+# print(f"Standard error reduction:  {(1 - anti_standard_error/std_standard_error):.1%}")
 
 def call_control_variate(S0, K, r, sigma, T, n_paths=100_000, seed=50):
     """European call with control variate variance reduction."""
     rng = np.random.default_rng(seed)
     
     Z = rng.standard_normal(n_paths)
-    ST = S0 * np.exp((r - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * Z)
+    terminal_prices = S0 * np.exp((r - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * Z)
     
-    payoffs = np.maximum(ST - K, 0)
+    payoffs = np.maximum(terminal_prices - K, 0)
     discount = np.exp(-r * T)
     
-    #control variate: terminal stock price ST
-    #known expected value of ST under risk-neutral measure
-    expected_ST = S0 * np.exp(r * T)
+    #control variate: terminal stock price 
+    #known expected value of terminal stock price under risk-neutral measure
+    expected_price = S0 * np.exp(r * T)
     
-    #estimate the covariance between payoffs and ST to compute beta
-    cov_matrix = np.cov(payoffs, ST)
-    beta = cov_matrix[0, 1] / cov_matrix[1, 1]
+    #estimate the covariance between payoffs and terminal prices to compute beta
+    covariance_matrix = np.cov(payoffs, terminal_prices)
+    beta = covariance_matrix[0, 1] / covariance_matrix[1, 1]
     
     #adjust payoffs using the control variate
-    adjusted = payoffs - beta * (ST - expected_ST)
+    adjusted = payoffs - beta * (terminal_prices - expected_price)
     price = discount * adjusted.mean()
-    se = discount * adjusted.std() / np.sqrt(n_paths)
+    standard_error = discount * adjusted.std() / np.sqrt(n_paths)
     
-    return price, se
+    return price, standard_error
 
 # #compare standard Monte Carlo and control variate for European call option pricing
-# cv_price, cv_se = call_control_variate(S0, K, r, sigma, T)
-#print(f"Control var:  £{cv_price:.4f} (SE: {cv_se:.4f})")
-#print(f"SE reduction vs standard: {(1 - cv_se/std_se):.1%}")
+# cv_price, cv_standard_error = call_control_variate(S0, K, r, sigma, T)
+# print(f"Control var:  £{cv_price:.4f} (Standard Error: {cv_standard_error:.4f})")
+# print(f"Standard error reduction vs standard: {(1 - cv_standard_error/std_standard_error):.1%}")
 
 def convergence_plot(S0, K, r, sigma, T, max_paths=200_000, seed=50):
     """Show the convergence of the Monte Carlo estimate for a European call option price."""
     rng = np.random.default_rng(seed)
     
     Z = rng.standard_normal(max_paths)
-    ST = S0 * np.exp((r - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * Z)
-    payoffs = np.maximum(ST - K, 0) * np.exp(-r * T)
+    terminal_prices = S0 * np.exp((r - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * Z)
+    payoffs = np.maximum(terminal_prices - K, 0) * np.exp(-r * T)
     
     #calculate cumulative means and standard errors for increasing path counts
     checkpoints = np.arange(100, max_paths + 1, 100)
@@ -313,16 +313,16 @@ def convergence_plot(S0, K, r, sigma, T, max_paths=200_000, seed=50):
     cumulative_squared_sum = np.cumsum(payoffs**2)
     means = cumulative_sum[checkpoints - 1] / checkpoints
     variances = cumulative_squared_sum[checkpoints - 1] / checkpoints - means**2
-    ses = np.sqrt(np.maximum(variances, 0)) / np.sqrt(checkpoints)
+    standard_errors = np.sqrt(np.maximum(variances, 0)) / np.sqrt(checkpoints)
     
     bs_price = black_scholes_call(S0, K, r, sigma, T)
     
     #plot the convergence of the Monte Carlo estimate with 95% confidence intervals
     plt.figure(figsize=(10, 6))
-    plt.plot(checkpoints, means, linewidth=0.8, color="steelblue", label="MC estimate")
+    plt.plot(checkpoints, means, linewidth=0.8, color="steelblue", label="Monte Carlo estimate")
     plt.fill_between(
         checkpoints, means - 1.96 * ses, means + 1.96 * ses,
-        alpha=0.2, color="steelblue", label="95% CI"
+        alpha=0.2, color="steelblue", label="95% Confidence Interval"
     )
     plt.axhline(bs_price, color="red", linestyle="--", label=f"Black-Scholes: £{bs_price:.4f}")
     plt.xlabel("Number of Paths")
@@ -346,37 +346,35 @@ def monte_carlo_pricer(S0, K, r, sigma, T, n_paths=200_000, seed=42):
     #generate the original and antithetic terminal prices separately
     drift = (r - 0.5 * sigma**2) * T
     diffusion = sigma * np.sqrt(T)
-    ST_positive = S0 * np.exp(drift + diffusion * Z)
-    ST_negative = S0 * np.exp(drift - diffusion * Z)
+    price_up = S0 * np.exp(drift + diffusion * Z)
+    price_down = S0 * np.exp(drift - diffusion * Z)
 
-    #average each antithetic pair
     payoff_pairs = 0.5 * (
-        np.maximum(ST_positive - K, 0)
-        + np.maximum(ST_negative - K, 0)
+        np.maximum(price_up - K, 0)
+        + np.maximum(price_down - K, 0)
     )
-    ST_pairs = 0.5 * (ST_positive + ST_negative)
+    price_pairs = 0.5 * (price_up + price_down)
 
-    #adjust the paired payoffs with the terminal stock-price control variate
-    expected_ST = S0 * np.exp(r * T)
+    expected_price = S0 * np.exp(r * T)
     
-    cov_est = np.cov(payoff_pairs, ST_pairs)
-    beta = cov_est[0, 1] / cov_est[1, 1]
+    covariance_est = np.cov(payoff_pairs, price_pairs)
+    beta = covariance_est[0, 1] / covariance_est[1, 1]
     
-    adjusted = payoff_pairs - beta * (ST_pairs - expected_ST)
+    adjusted = payoff_pairs - beta * (price_pairs - expected_price)
     
     discount = np.exp(-r * T)
     price = discount * adjusted.mean()
-    se = discount * adjusted.std() / np.sqrt(n_paths)
-    ci = (price - 1.96 * se, price + 1.96 * se)
-    
-    return price, se, ci
+    standard_error = discount * adjusted.std() / np.sqrt(n_paths)
+    confidence_interval = (price - 1.96 * standard_error, price + 1.96 * standard_error)
+
+    return price, standard_error, confidence_interval
 
 #run the full-featured Monte Carlo pricer and compare with Black-Scholes
-price, se, ci = monte_carlo_pricer(S0=100, K=105, r=0.05, sigma=0.25, T=1.0)
+price, standard_error, confidence_interval = monte_carlo_pricer(S0=100, K=105, r=0.05, sigma=0.25, T=1.0)
 bs = black_scholes_call(100, 105, 0.05, 0.25, 1.0)
 
 print(f"MC Price:       £{price:.4f}")
-print(f"Std Error:      £{se:.6f}")
-print(f"95% CI:         [£{ci[0]:.4f}, £{ci[1]:.4f}]")
+print(f"Std Error:      £{standard_error:.6f}")
+print(f"95% CI:         [£{confidence_interval[0]:.4f}, £{confidence_interval[1]:.4f}]")
 print(f"Black-Scholes:  £{bs:.4f}")
 print(f"Absolute Error: £{abs(price - bs):.6f}")
