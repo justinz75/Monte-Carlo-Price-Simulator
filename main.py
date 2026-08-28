@@ -2,19 +2,15 @@ import numpy as np
 from scipy import stats
 import matplotlib.pyplot as plt
 
-#set a seed for reproducibility
 rng = np.random.default_rng(seed = 50)
 
-#draw 10 samples from a standard normal distribution
 z = rng.standard_normal(10)
 print(z)
 
-#draw from N(mu, sigma^2)
 mu, sigma = 0.05, 0.2
 returns = rng.normal(mu, sigma, 10_000)
 print(f"Mean: {returns.mean():.4f}, Std: {returns.std():.4f}")
 
-#uniform random numbers on [0, 1)
 u = rng.uniform(size=10_000)
 
 def simulate_gbm(S0, mu, sigma, T, dt, n_paths, seed = 50):
@@ -22,21 +18,20 @@ def simulate_gbm(S0, mu, sigma, T, dt, n_paths, seed = 50):
     rng = np.random.default_rng(seed)
     n_steps = int(T / dt)
     
-    #generate standard normal random variables for the simulation
     Z = rng.standard_normal((n_steps, n_paths))
     
-    #calculate the drift and diffusion components of the GBM model and the log returns for each step
+    #drift and diffusion components of GBM model and log returns for each step
     drift = (mu - 0.5 * sigma**2) * dt
     diffusion = sigma * np.sqrt(dt) * Z
     log_returns = drift + diffusion
     
-    #calculate the cumulative log returns and exponentiate to get stock price paths
+    #cumulative log returns and exponentiate to get stock price paths
     log_paths = np.vstack([np.zeros(n_paths), np.cumsum(log_returns, axis=0)])
     paths = S0 * np.exp(log_paths)
     
     return paths
 
-# #parameters for the GBM simulation
+# #parameters for GBM simulation
 # S0 = 100  #initial stock price
 # mu = 0.05  #5% expected annual return
 # sigma = 0.2  #20% annual volatility
@@ -50,7 +45,7 @@ def simulate_gbm(S0, mu, sigma, T, dt, n_paths, seed = 50):
 
 # time_grid = np.linspace(0, T, paths.shape[0])
 
-# #visualise the first 50 simulated stock price paths
+# #visualise first 50 simulated stock price paths
 # plt.figure(figsize=(10, 6))
 # plt.plot(time_grid, paths[:, :50], alpha=0.3, linewidth=0.5)
 # plt.xlabel("Time (years)")
@@ -67,19 +62,18 @@ def european_call(S0, K, r, sigma, T, n_paths=10_000, seed=50):
     
     #simulate terminal stock prices
     Z = rng.standard_normal(n_paths)
-    ST = S0*np.exp((r - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * Z)
-    payoffs = np.maximum(ST - K, 0)
+    price_at_time = S0*np.exp((r - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * Z)
+    payoffs = np.maximum(price_at_time - K, 0)
     price = np.exp(-r * T) * payoffs.mean()
     
-    #standard error of the estimate
-    std_error = np.exp(-r * T) * payoffs.std() / np.sqrt(n_paths)
+    standard_error = np.exp(-r * T) * payoffs.std() / np.sqrt(n_paths)
     
-    return price, std_error
+    return price, standard_error
 
 #parameters for the European call option
 # S0, K, r, sigma, T = 100, 110, 0.05, 0.2, 1.0
-# mc_price, mc_std_error = european_call(S0, K, r, sigma, T)
-# print(f"Monte Carlo Price: {mc_price:.4f}, Standard Error: {mc_std_error:.4f}")
+# mc_price, mc_standard_error = european_call(S0, K, r, sigma, T)
+# print(f"Monte Carlo Price: {mc_price:.4f}, Standard Error: {mc_standard_error:.4f}")
 
 
 def black_scholes_call(S0, K, r, sigma, T):
@@ -108,7 +102,6 @@ def asian_call(S0, K, r, sigma, T, n_steps=252, n_paths=100_000, seed=50):
     log_paths = np.cumsum(log_returns, axis=0)
     paths = S0 * np.exp(log_paths)
     
-    #arithmetic average across all time steps for each path
     avg_prices = paths.mean(axis=0)
     
     payoffs = np.maximum(avg_prices - K, 0)
@@ -129,19 +122,15 @@ def up_and_out_call(S0, K, B, r, sigma, T, n_steps=252, n_paths=100_000, seed=50
     
     Z = rng.standard_normal((n_steps, n_paths))
     
-    #simulate the stock price paths using Geometric Brownian Motion
     log_returns = (r - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * Z
     log_paths = np.cumsum(log_returns, axis=0)
     paths = S0 * np.exp(log_paths)
     
-    #check if any path crossed the barrier
     knocked_out = np.any(paths >= B, axis=0)
     
-    #terminal payoff, zeroed out for knocked-out paths
-    ST = paths[-1]
-    payoffs = np.where(knocked_out, 0, np.maximum(ST - K, 0))
+    price_at_time = paths[-1]
+    payoffs = np.where(knocked_out, 0, np.maximum(price_at_time - K, 0))
     
-    #discounted expected payoff and standard error
     discount = np.exp(-r * T)
     price = discount * payoffs.mean()
     se = discount * payoffs.std() / np.sqrt(n_paths)
@@ -156,17 +145,13 @@ def monte_carlo_var(S0, mu, sigma, T, confidence = 0.95, n_paths = 100_000, seed
     """Estimate Value at Risk (VaR) and Conditional Value at Risk (CVaR) using Monte Carlo simulation."""
     rng = np.random.default_rng(seed)
     
-    #simulate terminal stock prices
     Z = rng.standard_normal(n_paths)
-    ST = S0 * np.exp((mu - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * Z)
+    price_at_time = S0 * np.exp((mu - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * Z)
     
-    #calculate losses
-    profit_and_losses = ST - S0
+    profit_and_losses = price_at_time - S0
     
-    #calculate the VaR at the specified confidence level
     var = -np.percentile(profit_and_losses, (1 - confidence) * 100)
     
-    #calculate the CVaR (expected shortfall) at the specified confidence level
     tail_losses = profit_and_losses[profit_and_losses <= -var]
     cvar = -tail_losses.mean() if len(tail_losses) > 0 else 0.0
     
@@ -177,7 +162,7 @@ def monte_carlo_var(S0, mu, sigma, T, confidence = 0.95, n_paths = 100_000, seed
 # print(f"Value at Risk (VaR): £{var:.4f}")
 # print(f"Conditional Value at Risk (CVaR): £{cvar:.4f}")
 
-##visualise the profit and loss distribution
+# #visualise the profit and loss distribution
 # plt.figure(figsize=(10, 6))
 # plt.hist(profit_and_losses, bins=200, density=True, alpha=0.7, color="steelblue", edgecolor="none")
 # plt.axvline(-var, color="red", linestyle="--", linewidth=2, label=f"95% VaR: £{var:,.0f}")
@@ -203,13 +188,11 @@ def simulate_correlated_portfolio(S0_vec, mu_vec, sigma_vec, corr_matrix, T, dt,
     #cholesky decomposition to get lower triangular matrix for correlation
     L = np.linalg.cholesky(cov_matrix)
     
-    #generate independent standard normal random variables and apply the correlation
-    Z_indep = rng.standard_normal((n_steps, n_paths, n_assets))
-    Z_corr = Z_indep @ L.T  # (n_steps, n_paths, n_assets)
+    Z_independent = rng.standard_normal((n_steps, n_paths, n_assets))
+    Z_correlation = Z_independent @ L.T 
     
-    #simulate each asset
     drift = (mu_vec - 0.5 * sigma_vec**2) * dt
-    diffusion = np.sqrt(dt) * Z_corr
+    diffusion = np.sqrt(dt) * Z_correlation
     log_returns = drift + diffusion
     log_paths = np.cumsum(log_returns, axis=0)
     paths = S0_vec * np.exp(log_paths)
@@ -245,14 +228,14 @@ portfolio_paths = paths @ shares  #(252, 10000)
 
 #compute terminal portfolio values and P&L
 terminal_values = portfolio_paths[-1]
-pnl = terminal_values - initial_investment
+profit_and_losses = terminal_values - initial_investment
 
-var_99 = -np.percentile(pnl, 1)
-cvar_99 = -pnl[pnl <= -var_99].mean()
+var_99 = -np.percentile(profit_and_losses, 1)
+cvar_99 = -profit_and_losses[profit_and_losses <= -var_99].mean()
 
 # print(f"Portfolio 99% 1-year VaR:  £{var_99:,.2f}")
 # print(f"Portfolio 99% 1-year CVaR: £{cvar_99:,.2f}")
-# print(f"Mean return: {pnl.mean() / initial_investment:.2%}")
+# print(f"Mean return: {profit_and_losses.mean() / initial_investment:.2%}")
 
 def call_antithetic(S0, K, r, sigma, T, n_paths=50_000, seed=50):
     """European call with antithetic variance reduction."""
