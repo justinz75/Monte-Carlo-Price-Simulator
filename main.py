@@ -9,17 +9,17 @@ z = rng.standard_normal(10)
 print(z)
 
 mu, sigma = 0.05, 0.2
-returns = rng.normal(mu, sigma, DEFAULT_N_PATHS)
+returns = rng.normal(mu, sigma, DEFAULT_N_PATHS, dtype=np.float32)
 print(f"Mean: {returns.mean():.4f}, Std: {returns.std():.4f}")
 
-u = rng.uniform(size=DEFAULT_N_PATHS)
+u = rng.uniform(size=DEFAULT_N_PATHS, dtype=np.float32)
 
 def simulate_gbm(S0, mu, sigma, T, dt, n_paths=DEFAULT_N_PATHS, seed = DEFAULT_SEED):
     """Simulate stock price paths using Geometric Brownian Motion paths"""
     rng = np.random.default_rng(seed)
     n_steps = int(T / dt)
     
-    Z = rng.standard_normal((n_steps, n_paths))
+    Z = rng.standard_normal((n_steps, n_paths), dtype=np.float32)
     
     #drift and diffusion components of GBM model and log returns for each step
     drift = (mu - 0.5 * sigma**2) * dt
@@ -37,7 +37,7 @@ def european_call(S0, K, r, sigma, T, n_paths=DEFAULT_N_PATHS, seed=DEFAULT_SEED
     rng = np.random.default_rng(seed)
     
     #simulate terminal stock prices
-    Z = rng.standard_normal(n_paths)
+    Z = rng.standard_normal(n_paths, dtype=np.float32)
     price_at_time = S0*np.exp((r - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * Z)
     payoffs = np.maximum(price_at_time - K, 0)
     price = np.exp(-r * T) * payoffs.mean()
@@ -60,7 +60,7 @@ def asian_call(S0, K, r, sigma, T, n_steps=DEFAULT_N_STEPS, n_paths=DEFAULT_N_PA
     rng = np.random.default_rng(seed)
     dt = T / n_steps
     
-    Z = rng.standard_normal((n_steps, n_paths))
+    Z = rng.standard_normal((n_steps, n_paths), dtype=np.float32)
     
     log_returns = (r - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * Z
     log_paths = np.cumsum(log_returns, axis=0)
@@ -80,7 +80,7 @@ def up_and_out_call(S0, K, B, r, sigma, T, n_steps=DEFAULT_N_STEPS, n_paths=DEFA
     rng = np.random.default_rng(seed)
     dt = T / n_steps
     
-    Z = rng.standard_normal((n_steps, n_paths))
+    Z = rng.standard_normal((n_steps, n_paths), dtype=np.float32)
     
     log_returns = (r - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * Z
     log_paths = np.cumsum(log_returns, axis=0)
@@ -101,7 +101,7 @@ def monte_carlo_var(S0, mu, sigma, T, confidence = DEFAULT_CONFIDENCE_LEVEL, n_p
     """Estimate Value at Risk (VaR) and Conditional Value at Risk (CVaR) using Monte Carlo simulation."""
     rng = np.random.default_rng(seed)
     
-    Z = rng.standard_normal(n_paths)
+    Z = rng.standard_normal(n_paths, dtype=np.float32)
     price_at_time = S0 * np.exp((mu - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * Z)
     
     profit_and_losses = price_at_time - S0
@@ -126,7 +126,7 @@ def simulate_correlated_portfolio(S0_vec, mu_vec, sigma_vec, correlation_matrix,
     #cholesky decomposition to get lower triangular matrix for correlation
     L = np.linalg.cholesky(covariance_matrix)
     
-    Z_independent = rng.standard_normal((n_steps, n_paths, n_assets))
+    Z_independent = rng.standard_normal((n_steps, n_paths, n_assets), dtype=np.float32)
     Z_correlation = Z_independent @ L.T 
     
     drift = (mu_vec - 0.5 * sigma_vec**2) * dt
@@ -141,7 +141,7 @@ def call_antithetic(S0, K, r, sigma, T, n_paths=DEFAULT_N_PATHS, seed=DEFAULT_SE
     """European call with antithetic variance reduction."""
     rng = np.random.default_rng(seed)
     
-    Z = rng.standard_normal(n_paths)
+    Z = rng.standard_normal(n_paths, dtype=np.float32)
     
     #simulate terminal stock prices for both the original and antithetic paths
     common_part = (r - 0.5 * sigma**2) * T
@@ -165,7 +165,7 @@ def call_control_variate(S0, K, r, sigma, T, n_paths=DEFAULT_N_PATHS_LARGE, seed
     """European call with control variate variance reduction."""
     rng = np.random.default_rng(seed)
     
-    Z = rng.standard_normal(n_paths)
+    Z = rng.standard_normal(n_paths, dtype=np.float32)
     terminal_prices = S0 * np.exp((r - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * Z)
     
     payoffs = np.maximum(terminal_prices - K, 0)
@@ -190,7 +190,7 @@ def convergence_plot(S0, K, r, sigma, T, max_paths=200_000, seed=DEFAULT_SEED):
     """Show the convergence of the Monte Carlo estimate for a European call option price."""
     rng = np.random.default_rng(seed)
     
-    Z = rng.standard_normal(max_paths)
+    Z = rng.standard_normal(max_paths, dtype=np.float32)
     terminal_prices = S0 * np.exp((r - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * Z)
     payoffs = np.maximum(terminal_prices - K, 0) * np.exp(-r * T)
     
@@ -226,7 +226,7 @@ def monte_carlo_pricer(S0, K, r, sigma, T, n_paths=DEFAULT_N_PATHS, seed=DEFAULT
     Returns price, standard error, and 95% confidence interval.
     """
     rng = np.random.default_rng(seed)
-    Z = rng.standard_normal(n_paths)
+    Z = rng.standard_normal(n_paths, dtype=np.float32)
     
     #generate the original and antithetic terminal prices separately
     drift = (r - 0.5 * sigma**2) * T
