@@ -75,6 +75,28 @@ def asian_call(S0, K, r, sigma, T, n_steps=DEFAULT_N_STEPS, n_paths=DEFAULT_N_PA
     
     return price, standard_error
 
+def asian_call_efficient(S0, K, r, sigma, T, n_steps=DEFAULT_N_STEPS, n_paths=DEFAULT_N_PATHS_LARGE, seed=DEFAULT_SEED):
+    """Price an arithmetic average Asian call option with memory optimization but slower execution."""
+    rng = np.random.default_rng(seed)
+    dt = T / n_steps
+    
+    price_sum = np.zeros(n_paths, dtype=np.float32)
+    current_price = np.full(n_paths, S0, dtype=np.float32)
+    
+    for step in range(n_steps):
+        Z = rng.standard_normal(n_paths, dtype=np.float32)
+        log_return = (r - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * Z
+        current_price = current_price * np.exp(log_return)
+        price_sum += current_price
+    
+    avg_prices = price_sum / n_steps
+    payoffs = np.maximum(avg_prices - K, 0)
+    discount = np.exp(-r * T)
+    price = discount * np.mean(payoffs)
+    standard_error = discount * np.std(payoffs) / np.sqrt(n_paths)
+    
+    return price, standard_error
+
 def up_and_out_call(S0, K, B, r, sigma, T, n_steps=DEFAULT_N_STEPS, n_paths=DEFAULT_N_PATHS, seed=DEFAULT_SEED):
     """Price an up-and-out barrier call option."""
     rng = np.random.default_rng(seed)
