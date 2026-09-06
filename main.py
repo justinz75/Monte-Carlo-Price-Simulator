@@ -2,6 +2,8 @@ import numpy as np
 from scipy import stats
 import matplotlib.pyplot as plt
 from constants import DEFAULT_CONFIDENCE_LEVEL, DEFAULT_SEED, DEFAULT_N_PATHS, DEFAULT_N_PATHS_LARGE, DEFAULT_N_STEPS
+from multiprocessing import Pool, cpu_count
+from functools import partial
 
 rng = np.random.default_rng(seed = DEFAULT_SEED)
 
@@ -43,6 +45,51 @@ def european_call(S0, K, r, sigma, T, n_paths=DEFAULT_N_PATHS, seed=DEFAULT_SEED
     price = np.exp(-r * T) * payoffs.mean()
     
     standard_error = np.exp(-r * T) * payoffs.std() / np.sqrt(n_paths)
+    
+    return price, standard_error
+
+def european_call_batched(S0, K, r, sigma, T, n_paths=100_000, batch_size=10_000, seed=DEFAULT_SEED):
+    """Memory-efficient batch processing"""
+    rng = np.random.default_rng(seed)
+    total_payoff = 0
+    total_payoff_sq = 0
+    
+    for i in range(0, n_paths, batch_size):
+        current_batch = min(batch_size, n_paths - i)
+        Z = rng.standard_normal(current_batch)
+        price_at_time = S0 * np.exp((r - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * Z)
+        payoffs = np.maximum(price_at_time - K, 0)
+        
+        total_payoff += payoffs.sum()
+        total_payoff_sq += (payoffs ** 2).sum()
+    
+    mean_payoff = total_payoff / n_paths
+    variance = (total_payoff_sq / n_paths) - mean_payoff ** 2
+    price = np.exp(-r * T) * mean_payoff
+    standard_error = np.exp(-r * T) * np.sqrt(variance / n_paths)
+    
+    return price, standard_error
+
+def parallel_european_chunk(args):
+    """Worker function for parallel simulation"""
+    S0, K, r, sigma, T, seed, n_paths = args
+    rng = np.random.default_rng(seed)
+    Z = rng.standard_normal(n_paths)
+    price_at_time = S0 * np.exp((r - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * Z)
+    payoffs = np.maximum(price_at_time - K, 0)
+    return payoffs
+
+def european_call_parallel(S0, K, r, sigma, T, n_paths=100_000, seed=DEFAULT_SEED):
+    """Parallel Monte Carlo using multiprocessing"""
+    n_processes = cpu_count()
+    paths_per_process = n_paths // n_processes
+    
+    #create a list of tasks for each process, each with a unique seed
+    tasks = [(S0, K, r, sigma, T, seed + i, paths_per_process) for i in range(n_processes)]
+    with Pool(n_processes) as pool: results = pool.map(parallel_european_chunk, tasks)
+    all_payoffs = np.concatenate(results)
+    price = np.exp(-r * T) * all_payoffs.mean()
+    standard_error = np.exp(-r * T) * all_payoffs.std() / np.sqrt(n_paths)
     
     return price, standard_error
 
