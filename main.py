@@ -1,20 +1,15 @@
 import numpy as np
 from scipy import stats
 import matplotlib.pyplot as plt
-from constants import DEFAULT_CONFIDENCE_LEVEL, DEFAULT_SEED, DEFAULT_N_PATHS, DEFAULT_N_PATHS_LARGE, DEFAULT_N_STEPS
+from constants import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_CONFIDENCE_LEVEL,
+    DEFAULT_SEED,
+    DEFAULT_N_PATHS,
+    DEFAULT_N_PATHS_LARGE,
+    DEFAULT_N_STEPS,
+)
 from multiprocessing import Pool, cpu_count
-from functools import partial
-
-rng = np.random.default_rng(seed = DEFAULT_SEED)
-
-z = rng.standard_normal(10)
-print(z)
-
-mu, sigma = 0.05, 0.2
-returns = rng.normal(mu, sigma, DEFAULT_N_PATHS, dtype=np.float32)
-print(f"Mean: {returns.mean():.4f}, Std: {returns.std():.4f}")
-
-u = rng.uniform(size=DEFAULT_N_PATHS, dtype=np.float32)
 
 def simulate_gbm(S0, mu, sigma, T, dt, n_paths=DEFAULT_N_PATHS, seed = DEFAULT_SEED):
     """Simulate stock price paths using Geometric Brownian Motion paths"""
@@ -51,20 +46,20 @@ def european_call(S0, K, r, sigma, T, n_paths=DEFAULT_N_PATHS, seed=DEFAULT_SEED
 def european_call_batched(S0, K, r, sigma, T, n_paths=100_000, batch_size=10_000, seed=DEFAULT_SEED):
     """Memory-efficient batch processing"""
     rng = np.random.default_rng(seed)
-    total_payoff = 0
-    total_payoff_sq = 0
+    total_payoff = 0.0
+    total_payoff_sq = 0.0
     
     for i in range(0, n_paths, batch_size):
         current_batch = min(batch_size, n_paths - i)
-        Z = rng.standard_normal(current_batch)
+        Z = rng.standard_normal(current_batch, dtype=np.float32)
         price_at_time = S0 * np.exp((r - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * Z)
         payoffs = np.maximum(price_at_time - K, 0)
         
-        total_payoff += payoffs.sum()
-        total_payoff_sq += (payoffs ** 2).sum()
+        total_payoff += payoffs.sum(dtype=np.float64)
+        total_payoff_sq += np.square(payoffs, dtype=np.float64).sum(dtype=np.float64)
     
     mean_payoff = total_payoff / n_paths
-    variance = (total_payoff_sq / n_paths) - mean_payoff ** 2
+    variance = max((total_payoff_sq / n_paths) - mean_payoff ** 2, 0.0)
     price = np.exp(-r * T) * mean_payoff
     standard_error = np.exp(-r * T) * np.sqrt(variance / n_paths)
     
@@ -74,22 +69,28 @@ def parallel_european_chunk(args):
     """Worker function for parallel simulation"""
     S0, K, r, sigma, T, seed, n_paths = args
     rng = np.random.default_rng(seed)
-    Z = rng.standard_normal(n_paths)
+    Z = rng.standard_normal(n_paths, dtype=np.float32)
     price_at_time = S0 * np.exp((r - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * Z)
     payoffs = np.maximum(price_at_time - K, 0)
     return payoffs
 
 def european_call_parallel(S0, K, r, sigma, T, n_paths=100_000, seed=DEFAULT_SEED):
     """Parallel Monte Carlo using multiprocessing"""
-    n_processes = cpu_count()
-    paths_per_process = n_paths // n_processes
+    n_processes = min(cpu_count(), n_paths)
+    path_counts = [
+        n_paths // n_processes + (worker_id < n_paths % n_processes)
+        for worker_id in range(n_processes)
+    ]
     
     #create a list of tasks for each process, each with a unique seed
-    tasks = [(S0, K, r, sigma, T, seed + i, paths_per_process) for i in range(n_processes)]
+    tasks = [
+        (S0, K, r, sigma, T, seed + worker_id, path_count)
+        for worker_id, path_count in enumerate(path_counts)
+    ]
     with Pool(n_processes) as pool: results = pool.map(parallel_european_chunk, tasks)
     all_payoffs = np.concatenate(results)
-    price = np.exp(-r * T) * all_payoffs.mean()
-    standard_error = np.exp(-r * T) * all_payoffs.std() / np.sqrt(n_paths)
+    price = np.exp(-r * T) * all_payoffs.mean(dtype=np.float64)
+    standard_error = np.exp(-r * T) * all_payoffs.std(dtype=np.float64) / np.sqrt(n_paths)
     
     return price, standard_error
 
@@ -102,23 +103,30 @@ def black_scholes_call(S0, K, r, sigma, T):
     call_value = S0 * stats.norm.cdf(d1) - K * discount * stats.norm.cdf(d2)
     return call_value
 
-def asian_call(S0, K, r, sigma, T, n_steps=DEFAULT_N_STEPS, n_paths=DEFAULT_N_PATHS, seed=DEFAULT_SEED):
-    """Price an arithmetic average Asian call option."""
+def asian_call(S0, K, r, sigma, T, n_steps=DEFAULT_N_STEPS,
+               n_paths=DEFAULT_N_PATHS, batch_size=DEFAULT_BATCH_SIZE,
+               seed=DEFAULT_SEED):
+    """Price an arithmetic average Asian call option in path batches."""
     rng = np.random.default_rng(seed)
     dt = T / n_steps
-    
-    Z = rng.standard_normal((n_steps, n_paths), dtype=np.float32)
-    
-    log_returns = (r - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * Z
-    log_paths = np.cumsum(log_returns, axis=0)
-    paths = S0 * np.exp(log_paths)
-    
-    avg_prices = paths.mean(axis=0)
-    
-    payoffs = np.maximum(avg_prices - K, 0)
+
+    total_payoff = 0.0
+    total_payoff_sq = 0.0
+    for start in range(0, n_paths, batch_size):
+        current_batch = min(batch_size, n_paths - start)
+        Z = rng.standard_normal((n_steps, current_batch), dtype=np.float32)
+        log_returns = (r - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * Z
+        log_paths = np.cumsum(log_returns, axis=0, dtype=np.float32)
+        paths = S0 * np.exp(log_paths)
+        payoffs = np.maximum(paths.mean(axis=0, dtype=np.float64) - K, 0)
+        total_payoff += payoffs.sum(dtype=np.float64)
+        total_payoff_sq += np.square(payoffs, dtype=np.float64).sum(dtype=np.float64)
+
     discount = np.exp(-r * T)
-    price = discount * np.mean(payoffs)
-    standard_error = discount * np.std(payoffs) / np.sqrt(len(payoffs))
+    mean_payoff = total_payoff / n_paths
+    variance = max((total_payoff_sq / n_paths) - mean_payoff**2, 0.0)
+    price = discount * mean_payoff
+    standard_error = discount * np.sqrt(variance / n_paths)
     
     return price, standard_error
 
@@ -139,30 +147,40 @@ def asian_call_efficient(S0, K, r, sigma, T, n_steps=DEFAULT_N_STEPS, n_paths=DE
     avg_prices = price_sum / n_steps
     payoffs = np.maximum(avg_prices - K, 0)
     discount = np.exp(-r * T)
-    price = discount * np.mean(payoffs)
-    standard_error = discount * np.std(payoffs) / np.sqrt(n_paths)
+    price = discount * np.mean(payoffs, dtype=np.float64)
+    standard_error = discount * np.std(payoffs, dtype=np.float64) / np.sqrt(n_paths)
     
     return price, standard_error
 
-def up_and_out_call(S0, K, B, r, sigma, T, n_steps=DEFAULT_N_STEPS, n_paths=DEFAULT_N_PATHS, seed=DEFAULT_SEED):
-    """Price an up-and-out barrier call option."""
+def up_and_out_call(S0, K, B, r, sigma, T, n_steps=DEFAULT_N_STEPS,
+                    n_paths=DEFAULT_N_PATHS, batch_size=DEFAULT_BATCH_SIZE,
+                    seed=DEFAULT_SEED):
+    """Price an up-and-out barrier call option in path batches."""
     rng = np.random.default_rng(seed)
     dt = T / n_steps
-    
-    Z = rng.standard_normal((n_steps, n_paths), dtype=np.float32)
-    
-    log_returns = (r - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * Z
-    log_paths = np.cumsum(log_returns, axis=0)
-    paths = S0 * np.exp(log_paths)
-    
-    knocked_out = np.any(paths >= B, axis=0)
-    
-    price_at_time = paths[-1]
-    payoffs = np.where(knocked_out, 0, np.maximum(price_at_time - K, 0))
-    
+
+    total_payoff = 0.0
+    total_payoff_sq = 0.0
+    for start in range(0, n_paths, batch_size):
+        current_batch = min(batch_size, n_paths - start)
+        Z = rng.standard_normal((n_steps, current_batch), dtype=np.float32)
+        log_returns = (r - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * Z
+        log_paths = np.cumsum(log_returns, axis=0, dtype=np.float32)
+        paths = S0 * np.exp(log_paths)
+        knocked_out = np.any(paths >= B, axis=0)
+        payoffs = np.where(
+            knocked_out,
+            0,
+            np.maximum(paths[-1] - K, 0),
+        )
+        total_payoff += payoffs.sum(dtype=np.float64)
+        total_payoff_sq += np.square(payoffs, dtype=np.float64).sum(dtype=np.float64)
+
     discount = np.exp(-r * T)
-    price = discount * payoffs.mean()
-    standard_error = discount * payoffs.std() / np.sqrt(n_paths)
+    mean_payoff = total_payoff / n_paths
+    variance = max((total_payoff_sq / n_paths) - mean_payoff**2, 0.0)
+    price = discount * mean_payoff
+    standard_error = discount * np.sqrt(variance / n_paths)
     
     return price, standard_error
 
@@ -323,12 +341,18 @@ def monte_carlo_pricer(S0, K, r, sigma, T, n_paths=DEFAULT_N_PATHS, seed=DEFAULT
 
     return price, standard_error, confidence_interval
 
-#run the full-featured Monte Carlo pricer and compare with Black-Scholes
-price, standard_error, confidence_interval = monte_carlo_pricer(S0=100, K=105, r=0.05, sigma=0.25, T=1.0)
-bs = black_scholes_call(100, 105, 0.05, 0.25, 1.0)
+def main():
+    price, standard_error, confidence_interval = monte_carlo_pricer(
+        S0=100, K=105, r=0.05, sigma=0.25, T=1.0
+    )
+    bs = black_scholes_call(100, 105, 0.05, 0.25, 1.0)
 
-print(f"MC Price:       £{price:.4f}")
-print(f"Std Error:      £{standard_error:.6f}")
-print(f"95% CI:         [£{confidence_interval[0]:.4f}, £{confidence_interval[1]:.4f}]")
-print(f"Black-Scholes:  £{bs:.4f}")
-print(f"Absolute Error: £{abs(price - bs):.6f}")
+    print(f"MC Price:       £{price:.4f}")
+    print(f"Std Error:      £{standard_error:.6f}")
+    print(f"95% CI:         [£{confidence_interval[0]:.4f}, £{confidence_interval[1]:.4f}]")
+    print(f"Black-Scholes:  £{bs:.4f}")
+    print(f"Absolute Error: £{abs(price - bs):.6f}")
+
+
+if __name__ == "__main__":
+    main()
