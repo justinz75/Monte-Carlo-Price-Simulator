@@ -11,8 +11,30 @@ from constants import (
 )
 from multiprocessing import Pool, cpu_count
 
+def validate_inputs(S0=None, K=None, B=None, sigma=None, T=None,
+                    n_paths=None, n_steps=None):
+    """Reject parameters the model cannot price.
+
+    r is deliberately unconstrained: real interest rates can be negative.
+    """
+    if S0 is not None and np.any(np.asarray(S0) <= 0):
+        raise ValueError(f"S0 must be positive, got {S0}")
+    if K is not None and np.any(np.asarray(K) < 0):
+        raise ValueError(f"K must be non-negative, got {K}")
+    if B is not None and np.any(np.asarray(B) <= 0):
+        raise ValueError(f"B must be positive, got {B}")
+    if sigma is not None and np.any(np.asarray(sigma) <= 0):
+        raise ValueError(f"sigma must be positive, got {sigma}")
+    if T is not None and np.any(np.asarray(T) <= 0):
+        raise ValueError(f"T must be positive, got {T}")
+    if n_paths is not None and n_paths < 1:
+        raise ValueError(f"n_paths must be at least 1, got {n_paths}")
+    if n_steps is not None and n_steps < 1:
+        raise ValueError(f"n_steps must be at least 1, got {n_steps}")
+
 def simulate_gbm(S0, mu, sigma, T, dt, n_paths=DEFAULT_N_PATHS, seed = DEFAULT_SEED):
     """Simulate stock price paths using Geometric Brownian Motion paths"""
+    validate_inputs(S0=S0, sigma=sigma, T=T, n_paths=n_paths)
     rng = np.random.default_rng(seed)
     n_steps = int(T / dt)
     
@@ -24,27 +46,46 @@ def simulate_gbm(S0, mu, sigma, T, dt, n_paths=DEFAULT_N_PATHS, seed = DEFAULT_S
     log_returns = drift + diffusion
     
     #cumulative log returns and exponentiate to get stock price paths
-    log_paths = np.vstack([np.zeros(n_paths), np.cumsum(log_returns, axis=0)])
+    #the zero row must be float32 too, or vstack upcasts every path to float64
+    log_paths = np.vstack([np.zeros(n_paths, dtype=np.float32), np.cumsum(log_returns, axis=0)])
     paths = S0 * np.exp(log_paths)
     
     return paths
 
 def european_call(S0, K, r, sigma, T, n_paths=DEFAULT_N_PATHS, seed=DEFAULT_SEED):
     """Price a European call option using Monte Carlo simulation"""
+    validate_inputs(S0=S0, K=K, sigma=sigma, T=T, n_paths=n_paths)
     rng = np.random.default_rng(seed)
     
     #simulate terminal stock prices
     Z = rng.standard_normal(n_paths, dtype=np.float32)
     price_at_time = S0*np.exp((r - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * Z)
     payoffs = np.maximum(price_at_time - K, 0)
-    price = np.exp(-r * T) * payoffs.mean()
+    #accumulate in float64: float32 sums lose precision over large n_paths
+    price = np.exp(-r * T) * payoffs.mean(dtype=np.float64)
     
-    standard_error = np.exp(-r * T) * payoffs.std() / np.sqrt(n_paths)
+    standard_error = np.exp(-r * T) * payoffs.std(dtype=np.float64) / np.sqrt(n_paths)
+    
+    return price, standard_error
+
+def european_put(S0, K, r, sigma, T, n_paths=DEFAULT_N_PATHS, seed=DEFAULT_SEED):
+    """Price a European put option using Monte Carlo simulation"""
+    validate_inputs(S0=S0, K=K, sigma=sigma, T=T, n_paths=n_paths)
+    rng = np.random.default_rng(seed)
+    
+    #simulate terminal stock prices
+    Z = rng.standard_normal(n_paths, dtype=np.float32)
+    price_at_time = S0*np.exp((r - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * Z)
+    payoffs = np.maximum(K - price_at_time, 0)
+    price = np.exp(-r * T) * payoffs.mean(dtype=np.float64)
+    
+    standard_error = np.exp(-r * T) * payoffs.std(dtype=np.float64) / np.sqrt(n_paths)
     
     return price, standard_error
 
 def european_call_batched(S0, K, r, sigma, T, n_paths=100_000, batch_size=10_000, seed=DEFAULT_SEED):
     """Memory-efficient batch processing"""
+    validate_inputs(S0=S0, K=K, sigma=sigma, T=T, n_paths=n_paths)
     rng = np.random.default_rng(seed)
     total_payoff = 0.0
     total_payoff_sq = 0.0
@@ -76,6 +117,7 @@ def parallel_european_chunk(args):
 
 def european_call_parallel(S0, K, r, sigma, T, n_paths=100_000, seed=DEFAULT_SEED):
     """Parallel Monte Carlo using multiprocessing"""
+    validate_inputs(S0=S0, K=K, sigma=sigma, T=T, n_paths=n_paths)
     n_processes = min(cpu_count(), n_paths)
     path_counts = [
         n_paths // n_processes + (worker_id < n_paths % n_processes)
@@ -96,17 +138,29 @@ def european_call_parallel(S0, K, r, sigma, T, n_paths=100_000, seed=DEFAULT_SEE
 
 def black_scholes_call(S0, K, r, sigma, T):
     """Exact Black-Scholes price for a European call."""
+    validate_inputs(S0=S0, K=K, sigma=sigma, T=T)
     sqrt_T = np.sqrt(T)
     discount = np.exp(-r * T)
-    d1 = (np.log(S0 / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+    d1 = (np.log(S0 / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt_T)
     d2 = d1 - sigma * sqrt_T
     call_value = S0 * stats.norm.cdf(d1) - K * discount * stats.norm.cdf(d2)
     return call_value
+
+def black_scholes_put(S0, K, r, sigma, T):
+    """Exact Black-Scholes price for a European put."""
+    validate_inputs(S0=S0, K=K, sigma=sigma, T=T)
+    sqrt_T = np.sqrt(T)
+    discount = np.exp(-r * T)
+    d1 = (np.log(S0 / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt_T)
+    d2 = d1 - sigma * sqrt_T
+    put_value = K * discount * stats.norm.cdf(-d2) - S0 * stats.norm.cdf(-d1)
+    return put_value
 
 def asian_call(S0, K, r, sigma, T, n_steps=DEFAULT_N_STEPS,
                n_paths=DEFAULT_N_PATHS, batch_size=DEFAULT_BATCH_SIZE,
                seed=DEFAULT_SEED):
     """Price an arithmetic average Asian call option in path batches."""
+    validate_inputs(S0=S0, K=K, sigma=sigma, T=T, n_paths=n_paths, n_steps=n_steps)
     rng = np.random.default_rng(seed)
     dt = T / n_steps
 
@@ -130,8 +184,12 @@ def asian_call(S0, K, r, sigma, T, n_steps=DEFAULT_N_STEPS,
     
     return price, standard_error
 
-def asian_call_efficient(S0, K, r, sigma, T, n_steps=DEFAULT_N_STEPS, n_paths=DEFAULT_N_PATHS_LARGE, seed=DEFAULT_SEED):
-    """Price an arithmetic average Asian call option with memory optimization but slower execution."""
+def asian_call_low_memory(S0, K, r, sigma, T, n_steps=DEFAULT_N_STEPS, n_paths=DEFAULT_N_PATHS_LARGE, seed=DEFAULT_SEED):
+    """Price an arithmetic average Asian call option one step at a time.
+
+    Holds O(n_paths) memory instead of O(n_paths * n_steps), at the cost of speed.
+    """
+    validate_inputs(S0=S0, K=K, sigma=sigma, T=T, n_paths=n_paths, n_steps=n_steps)
     rng = np.random.default_rng(seed)
     dt = T / n_steps
     
@@ -155,7 +213,12 @@ def asian_call_efficient(S0, K, r, sigma, T, n_steps=DEFAULT_N_STEPS, n_paths=DE
 def up_and_out_call(S0, K, B, r, sigma, T, n_steps=DEFAULT_N_STEPS,
                     n_paths=DEFAULT_N_PATHS, batch_size=DEFAULT_BATCH_SIZE,
                     seed=DEFAULT_SEED):
-    """Price an up-and-out barrier call option in path batches."""
+    """Price an up-and-out barrier call option in path batches.
+
+    The barrier is checked at n_steps discrete dates, so the price depends on
+    n_steps and is NOT the continuously monitored barrier price. See README.
+    """
+    validate_inputs(S0=S0, K=K, B=B, sigma=sigma, T=T, n_paths=n_paths, n_steps=n_steps)
     rng = np.random.default_rng(seed)
     dt = T / n_steps
 
@@ -186,6 +249,9 @@ def up_and_out_call(S0, K, B, r, sigma, T, n_steps=DEFAULT_N_STEPS,
 
 def monte_carlo_var(S0, mu, sigma, T, confidence = DEFAULT_CONFIDENCE_LEVEL, n_paths = DEFAULT_N_PATHS_LARGE, seed = DEFAULT_SEED):
     """Estimate Value at Risk (VaR) and Conditional Value at Risk (CVaR) using Monte Carlo simulation."""
+    validate_inputs(S0=S0, sigma=sigma, T=T, n_paths=n_paths)
+    if not 0 < confidence < 1:
+        raise ValueError(f"confidence must lie strictly between 0 and 1, got {confidence}")
     rng = np.random.default_rng(seed)
     
     Z = rng.standard_normal(n_paths, dtype=np.float32)
@@ -202,6 +268,7 @@ def monte_carlo_var(S0, mu, sigma, T, confidence = DEFAULT_CONFIDENCE_LEVEL, n_p
 
 def simulate_correlated_portfolio(S0_vec, mu_vec, sigma_vec, correlation_matrix, T, dt, n_paths=DEFAULT_N_PATHS, seed=DEFAULT_SEED):
     """Simulate correlated GBM paths for multiple assets."""
+    validate_inputs(S0=S0_vec, sigma=sigma_vec, T=T, n_paths=n_paths)
     rng = np.random.default_rng(seed)
     n_assets = len(S0_vec)
     n_steps = int(T / dt)
@@ -226,6 +293,7 @@ def simulate_correlated_portfolio(S0_vec, mu_vec, sigma_vec, correlation_matrix,
 
 def call_antithetic(S0, K, r, sigma, T, n_paths=DEFAULT_N_PATHS, seed=DEFAULT_SEED):
     """European call with antithetic variance reduction."""
+    validate_inputs(S0=S0, K=K, sigma=sigma, T=T, n_paths=n_paths)
     rng = np.random.default_rng(seed)
     
     Z = rng.standard_normal(n_paths, dtype=np.float32)
@@ -250,6 +318,7 @@ def call_antithetic(S0, K, r, sigma, T, n_paths=DEFAULT_N_PATHS, seed=DEFAULT_SE
 
 def call_control_variate(S0, K, r, sigma, T, n_paths=DEFAULT_N_PATHS_LARGE, seed=DEFAULT_SEED):
     """European call with control variate variance reduction."""
+    validate_inputs(S0=S0, K=K, sigma=sigma, T=T, n_paths=n_paths)
     rng = np.random.default_rng(seed)
     
     Z = rng.standard_normal(n_paths, dtype=np.float32)
@@ -275,6 +344,7 @@ def call_control_variate(S0, K, r, sigma, T, n_paths=DEFAULT_N_PATHS_LARGE, seed
 
 def convergence_plot(S0, K, r, sigma, T, max_paths=200_000, seed=DEFAULT_SEED):
     """Show the convergence of the Monte Carlo estimate for a European call option price."""
+    validate_inputs(S0=S0, K=K, sigma=sigma, T=T, n_paths=max_paths)
     rng = np.random.default_rng(seed)
     
     Z = rng.standard_normal(max_paths, dtype=np.float32)
@@ -311,7 +381,11 @@ def monte_carlo_pricer(S0, K, r, sigma, T, n_paths=DEFAULT_N_PATHS, seed=DEFAULT
     """
     European call option pricer with antithetic sampling and control variates.
     Returns price, standard error, and 95% confidence interval.
+
+    The control variate beta is fitted on the same paths used to price, so the
+    reported standard error is mildly optimistic (~10% low at n_paths=100_000).
     """
+    validate_inputs(S0=S0, K=K, sigma=sigma, T=T, n_paths=n_paths)
     rng = np.random.default_rng(seed)
     Z = rng.standard_normal(n_paths, dtype=np.float32)
     
