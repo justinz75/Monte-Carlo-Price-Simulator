@@ -1,7 +1,10 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from constants import DEFAULT_N_PATHS, DEFAULT_N_PATHS_LARGE
-from main import black_scholes_call, simulate_correlated_portfolio, monte_carlo_var, convergence_plot, call_antithetic, call_control_variate, simulate_gbm, up_and_out_call, asian_call, monte_carlo_pricer, european_call
+from main import (black_scholes_call, black_scholes_put, simulate_correlated_portfolio,
+                  monte_carlo_var, convergence_plot, call_antithetic, call_control_variate,
+                  simulate_gbm, up_and_out_call, asian_call, monte_carlo_pricer,
+                  european_call, european_put)
 
 #parameters for GBM simulation
 S0 = 100  #initial stock price
@@ -36,6 +39,26 @@ print(f"Monte Carlo Price: {mc_price:.4f}, Standard Error: {mc_standard_error:.4
 bs_price = black_scholes_call(S0, K, r, sigma, T)
 print(f"Black-Scholes price: £{bs_price:.4f}")
 print(f"MC error: £{abs(mc_price - bs_price):.4f}")
+
+#put-call parity: C - P = S0 - K*exp(-r*T). Exact under Black-Scholes.
+bs_put_price = black_scholes_put(S0, K, r, sigma, T)
+parity_rhs = S0 - K * np.exp(-r * T)
+bs_parity_error = abs((bs_price - bs_put_price) - parity_rhs)
+print(f"Black-Scholes put: £{bs_put_price:.4f}")
+print(f"Parity residual (Black-Scholes): £{bs_parity_error:.2e}")
+assert bs_parity_error < 1e-8, "Black-Scholes call and put break put-call parity"
+
+#the MC call and put share a seed, so the only parity error is the sampling
+#error in the sample mean of the terminal price. Tolerance derived, not guessed.
+mc_call_100k, _ = european_call(S0, K, r, sigma, T, n_paths=DEFAULT_N_PATHS_LARGE)
+mc_put_100k, mc_put_standard_error = european_put(S0, K, r, sigma, T, n_paths=DEFAULT_N_PATHS_LARGE)
+mc_parity_error = abs((mc_call_100k - mc_put_100k) - parity_rhs)
+terminal_standard_error = (
+    S0 * np.sqrt(np.expm1(sigma**2 * T)) / np.sqrt(DEFAULT_N_PATHS_LARGE)
+)
+print(f"Monte Carlo put:   £{mc_put_100k:.4f} (Standard Error: {mc_put_standard_error:.4f})")
+print(f"Parity residual (Monte Carlo):   £{mc_parity_error:.4f} (tolerance £{5 * terminal_standard_error:.4f})")
+assert mc_parity_error < 5 * terminal_standard_error, "MC call and put break put-call parity"
 
 # #parameters for the Asian call option
 asian_price, asian_standard_error = asian_call(S0=100, K=105, r=0.05, sigma=0.25, T=1.0)
@@ -101,18 +124,30 @@ print(f"Portfolio 99% 1-year VaR:  £{var_99:,.2f}")
 print(f"Portfolio 99% 1-year CVaR: £{cvar_99:,.2f}")
 print(f"Mean return: {profit_and_losses.mean() / initial_investment:.2%}")
 
-#compare standard Monte Carlo and antithetic variates for European call option pricing
-standard_price, std_standard_error = european_call(S0, K, r, sigma, T, n_paths=DEFAULT_N_PATHS_LARGE)
-anti_price, anti_standard_error = call_antithetic(S0, K, r, sigma, T, n_paths=DEFAULT_N_PATHS)
+#compare the variance reduction methods on a MATCHED budget of normal draws.
+#antithetic methods consume two draws per path, so they get half the path count.
+#comparing 100k standard paths against 10k antithetic pairs would be 5x the budget
+#for one side and makes antithetic look far worse than it is.
+n_draws = DEFAULT_N_PATHS_LARGE
+standard_price, std_standard_error = european_call(S0, K, r, sigma, T, n_paths=n_draws)
+anti_price, anti_standard_error = call_antithetic(S0, K, r, sigma, T, n_paths=n_draws // 2)
+cv_price, cv_standard_error = call_control_variate(S0, K, r, sigma, T, n_paths=n_draws)
+combined_price, combined_standard_error, combined_ci = monte_carlo_pricer(
+    S0, K, r, sigma, T, n_paths=n_draws // 2
+)
 
-print(f"Standard MC:  £{standard_price:.4f} (Standard Error: {std_standard_error:.4f})")
-print(f"Antithetic:   £{anti_price:.4f} (Standard Error: {anti_standard_error:.4f})")
-print(f"Standard error reduction:  {(1 - anti_standard_error/std_standard_error):.1%}")
-
-#compare standard Monte Carlo and control variate for European call option pricing
-cv_price, cv_standard_error = call_control_variate(S0, K, r, sigma, T)
-print(f"Control var:  £{cv_price:.4f} (Standard Error: {cv_standard_error:.4f})")
-print(f"Standard error reduction vs standard: {(1 - cv_standard_error/std_standard_error):.1%}")
+print(f"\nVariance reduction at {n_draws:,} normal draws (Black-Scholes = £{bs_price:.4f}):")
+print(f"{'method':<28}{'price':>10}{'std error':>12}{'vs standard':>14}")
+for label, price_estimate, standard_error in [
+    ("standard", standard_price, std_standard_error),
+    ("antithetic", anti_price, anti_standard_error),
+    ("control variate", cv_price, cv_standard_error),
+    ("antithetic + control", combined_price, combined_standard_error),
+]:
+    reduction = f"{1 - standard_error / std_standard_error:>13.1%}" if label != "standard" else f"{'-':>14}"
+    print(f"{label:<28}£{price_estimate:>9.4f}{standard_error:>12.5f}{reduction}")
+print("\nnote: methods that fit a control variate beta in-sample report a standard")
+print("error roughly 10% below the spread actually seen across seeds.")
 
 #convergence plot for European call option pricing
 convergence_plot(S0, K, r, sigma, T)
