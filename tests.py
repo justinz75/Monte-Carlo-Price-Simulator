@@ -1,10 +1,13 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import pandas as pd
 from constants import DEFAULT_N_PATHS, DEFAULT_N_PATHS_LARGE
 from main import (black_scholes_call, black_scholes_put, simulate_correlated_portfolio,
                   monte_carlo_var, convergence_plot, call_antithetic, call_control_variate,
                   simulate_gbm, up_and_out_call, asian_call, monte_carlo_pricer,
-                  european_call, european_put)
+                  european_call, european_put, implied_volatility)
+from volatility_smile import (drop_arbitrage_violations, implied_forward, out_of_the_money,
+                              with_implied_vols)
 
 #parameters for GBM simulation
 S0 = 100  #initial stock price
@@ -40,7 +43,7 @@ bs_price = black_scholes_call(S0, K, r, sigma, T)
 print(f"Black-Scholes price: £{bs_price:.4f}")
 print(f"MC error: £{abs(mc_price - bs_price):.4f}")
 
-#put-call parity: C - P = S0 - K*exp(-r*T). Exact under Black-Scholes.
+#check put-call parity for the Black-Scholes prices
 bs_put_price = black_scholes_put(S0, K, r, sigma, T)
 parity_rhs = S0 - K * np.exp(-r * T)
 bs_parity_error = abs((bs_price - bs_put_price) - parity_rhs)
@@ -48,8 +51,7 @@ print(f"Black-Scholes put: £{bs_put_price:.4f}")
 print(f"Parity residual (Black-Scholes): £{bs_parity_error:.2e}")
 assert bs_parity_error < 1e-8, "Black-Scholes call and put break put-call parity"
 
-#the MC call and put share a seed, so the only parity error is the sampling
-#error in the sample mean of the terminal price. Tolerance derived, not guessed.
+#check put-call parity for the Monte Carlo prices, within the sampling error of the terminal price
 mc_call_100k, _ = european_call(S0, K, r, sigma, T, n_paths=DEFAULT_N_PATHS_LARGE)
 mc_put_100k, mc_put_standard_error = european_put(S0, K, r, sigma, T, n_paths=DEFAULT_N_PATHS_LARGE)
 mc_parity_error = abs((mc_call_100k - mc_put_100k) - parity_rhs)
@@ -59,6 +61,58 @@ terminal_standard_error = (
 print(f"Monte Carlo put:   £{mc_put_100k:.4f} (Standard Error: {mc_put_standard_error:.4f})")
 print(f"Parity residual (Monte Carlo):   £{mc_parity_error:.4f} (tolerance £{5 * terminal_standard_error:.4f})")
 assert mc_parity_error < 5 * terminal_standard_error, "MC call and put break put-call parity"
+
+#a dividend yield should give the same price as a spot reduced by the dividends
+dividend_yield = 0.02
+for pricer in (black_scholes_call, black_scholes_put):
+    with_yield = pricer(S0, K, r, sigma, T, q=dividend_yield)
+    reduced_spot = pricer(S0 * np.exp(-dividend_yield * T), K, r, sigma, T)
+    assert abs(with_yield - reduced_spot) < 1e-10, f"{pricer.__name__} mishandles the dividend yield"
+
+#price options at known volatilities and check implied volatility recovers them
+for option_type, pricer in (("call", black_scholes_call), ("put", black_scholes_put)):
+    for strike in (80, 100, 120):
+        for true_sigma in (0.1, 0.25, 0.6):
+            model_price = pricer(100, strike, 0.05, true_sigma, 0.5, q=0.02)
+            recovered = implied_volatility(model_price, 100, strike, 0.05, 0.5, q=0.02, option_type=option_type)
+            assert abs(recovered - true_sigma) < 1e-6, f"{option_type} K={strike}: wanted {true_sigma}, got {recovered}"
+print("Implied volatility: recovered all 18 volatilities to within 1e-6")
+
+#a call priced below its intrinsic value has no implied volatility
+assert np.isnan(implied_volatility(1.0, 100, 80, 0.05, 0.5)), "an impossible price should give nan"
+
+#run the smile pipeline on a synthetic chain and check it recovers the forward and skew
+spot_synthetic, rate, dividend, expiry_years = 5000.0, 0.04, 0.015, 0.25
+strikes = np.arange(4000.0, 5801.0, 50.0)
+true_vol_by_strike = {strike: 0.18 - 0.25 * (strike / spot_synthetic - 1) for strike in strikes}
+synthetic_chain = pd.DataFrame(
+    [{"option_type": "call", "strike": strike,
+      "mid": black_scholes_call(spot_synthetic, strike, rate, vol, expiry_years, q=dividend)}
+     for strike, vol in true_vol_by_strike.items()]
+    + [{"option_type": "put", "strike": strike,
+        "mid": black_scholes_put(spot_synthetic, strike, rate, vol, expiry_years, q=dividend)}
+       for strike, vol in true_vol_by_strike.items()]
+)
+true_forward = spot_synthetic * np.exp((rate - dividend) * expiry_years)
+recovered_forward = implied_forward(synthetic_chain, np.exp(-rate * expiry_years))
+assert abs(recovered_forward - true_forward) < 1e-6, f"forward: wanted {true_forward}, got {recovered_forward}"
+
+implied_dividend = rate - np.log(recovered_forward / spot_synthetic) / expiry_years
+synthetic_smile = with_implied_vols(out_of_the_money(synthetic_chain, recovered_forward),
+                                    spot_synthetic, rate, expiry_years, implied_dividend)
+vol_errors = synthetic_smile["implied_vol"] - synthetic_smile["strike"].map(true_vol_by_strike)
+assert vol_errors.abs().max() < 1e-6, "the smile pipeline did not recover the input skew"
+print(f"Smile pipeline: recovered the forward and all {len(synthetic_smile)} input vols from prices alone")
+
+#the filter should keep a clean chain and drop a planted stale quote, too cheap or too dear
+assert len(drop_arbitrage_violations(synthetic_chain)) == len(synthetic_chain), "the filter dropped good quotes"
+stale_row = synthetic_chain.index[(synthetic_chain["option_type"] == "put") & (synthetic_chain["strike"] == 4500.0)][0]
+for mispricing in (0.5, 2.0):
+    stale_chain = synthetic_chain.copy()
+    stale_chain.loc[stale_row, "mid"] *= mispricing
+    dropped = set(stale_chain.index) - set(drop_arbitrage_violations(stale_chain).index)
+    assert dropped == {stale_row}, f"stale quote priced x{mispricing}: the filter dropped {dropped}"
+print("No-arbitrage filter: kept the clean chain whole and caught both planted stale quotes")
 
 # #parameters for the Asian call option
 asian_price, asian_standard_error = asian_call(S0=100, K=105, r=0.05, sigma=0.25, T=1.0)
@@ -124,10 +178,8 @@ print(f"Portfolio 99% 1-year VaR:  £{var_99:,.2f}")
 print(f"Portfolio 99% 1-year CVaR: £{cvar_99:,.2f}")
 print(f"Mean return: {profit_and_losses.mean() / initial_investment:.2%}")
 
-#compare the variance reduction methods on a MATCHED budget of normal draws.
-#antithetic methods consume two draws per path, so they get half the path count.
-#comparing 100k standard paths against 10k antithetic pairs would be 5x the budget
-#for one side and makes antithetic look far worse than it is.
+#compare the variance reduction methods using the same number of random draws
+#antithetic methods use two draws per path so they get half the paths
 n_draws = DEFAULT_N_PATHS_LARGE
 standard_price, std_standard_error = european_call(S0, K, r, sigma, T, n_paths=n_draws)
 anti_price, anti_standard_error = call_antithetic(S0, K, r, sigma, T, n_paths=n_draws // 2)

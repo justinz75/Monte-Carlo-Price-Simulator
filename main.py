@@ -1,5 +1,5 @@
 import numpy as np
-from scipy import stats
+from scipy import optimize, stats
 import matplotlib.pyplot as plt
 from constants import (
     DEFAULT_BATCH_SIZE,
@@ -13,10 +13,7 @@ from multiprocessing import Pool, cpu_count
 
 def validate_inputs(S0=None, K=None, B=None, sigma=None, T=None,
                     n_paths=None, n_steps=None):
-    """Reject parameters the model cannot price.
-
-    r is deliberately unconstrained: real interest rates can be negative.
-    """
+    """Check the inputs are valid, leaving r unchecked as rates can be negative."""
     if S0 is not None and np.any(np.asarray(S0) <= 0):
         raise ValueError(f"S0 must be positive, got {S0}")
     if K is not None and np.any(np.asarray(K) < 0):
@@ -46,7 +43,7 @@ def simulate_gbm(S0, mu, sigma, T, dt, n_paths=DEFAULT_N_PATHS, seed = DEFAULT_S
     log_returns = drift + diffusion
     
     #cumulative log returns and exponentiate to get stock price paths
-    #the zero row must be float32 too, or vstack upcasts every path to float64
+    #float32 zeros so vstack doesn't upcast the paths to float64
     log_paths = np.vstack([np.zeros(n_paths, dtype=np.float32), np.cumsum(log_returns, axis=0)])
     paths = S0 * np.exp(log_paths)
     
@@ -61,7 +58,7 @@ def european_call(S0, K, r, sigma, T, n_paths=DEFAULT_N_PATHS, seed=DEFAULT_SEED
     Z = rng.standard_normal(n_paths, dtype=np.float32)
     price_at_time = S0*np.exp((r - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * Z)
     payoffs = np.maximum(price_at_time - K, 0)
-    #accumulate in float64: float32 sums lose precision over large n_paths
+    #accumulate in float64 to keep precision over many paths
     price = np.exp(-r * T) * payoffs.mean(dtype=np.float64)
     
     standard_error = np.exp(-r * T) * payoffs.std(dtype=np.float64) / np.sqrt(n_paths)
@@ -136,25 +133,46 @@ def european_call_parallel(S0, K, r, sigma, T, n_paths=100_000, seed=DEFAULT_SEE
     
     return price, standard_error
 
-def black_scholes_call(S0, K, r, sigma, T):
-    """Exact Black-Scholes price for a European call."""
+def black_scholes_call(S0, K, r, sigma, T, q=0.0):
+    """Exact Black-Scholes price for a European call, with an optional dividend yield q."""
     validate_inputs(S0=S0, K=K, sigma=sigma, T=T)
     sqrt_T = np.sqrt(T)
     discount = np.exp(-r * T)
-    d1 = (np.log(S0 / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt_T)
+    d1 = (np.log(S0 / K) + (r - q + 0.5 * sigma**2) * T) / (sigma * sqrt_T)
     d2 = d1 - sigma * sqrt_T
-    call_value = S0 * stats.norm.cdf(d1) - K * discount * stats.norm.cdf(d2)
+    call_value = S0 * np.exp(-q * T) * stats.norm.cdf(d1) - K * discount * stats.norm.cdf(d2)
     return call_value
 
-def black_scholes_put(S0, K, r, sigma, T):
-    """Exact Black-Scholes price for a European put."""
+def black_scholes_put(S0, K, r, sigma, T, q=0.0):
+    """Exact Black-Scholes price for a European put, with an optional dividend yield q."""
     validate_inputs(S0=S0, K=K, sigma=sigma, T=T)
     sqrt_T = np.sqrt(T)
     discount = np.exp(-r * T)
-    d1 = (np.log(S0 / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt_T)
+    d1 = (np.log(S0 / K) + (r - q + 0.5 * sigma**2) * T) / (sigma * sqrt_T)
     d2 = d1 - sigma * sqrt_T
-    put_value = K * discount * stats.norm.cdf(-d2) - S0 * stats.norm.cdf(-d1)
+    put_value = K * discount * stats.norm.cdf(-d2) - S0 * np.exp(-q * T) * stats.norm.cdf(-d1)
     return put_value
+
+def implied_volatility(price, S0, K, r, T, q=0.0, option_type="call",
+                       sigma_low=1e-4, sigma_high=5.0):
+    """Black-Scholes implied volatility using Brent's method, nan if the price can't be matched."""
+    validate_inputs(S0=S0, K=K, T=T)
+    if option_type == "call":
+        pricer = black_scholes_call
+    elif option_type == "put":
+        pricer = black_scholes_put
+    else:
+        raise ValueError(f"option_type must be 'call' or 'put', got {option_type!r}")
+    if not price > 0:
+        return np.nan
+
+    def pricing_error(sigma):
+        return pricer(S0, K, r, sigma, T, q) - price
+
+    #check the price can be matched between the volatility bounds
+    if pricing_error(sigma_low) >= 0 or pricing_error(sigma_high) <= 0:
+        return np.nan
+    return optimize.brentq(pricing_error, sigma_low, sigma_high)
 
 def asian_call(S0, K, r, sigma, T, n_steps=DEFAULT_N_STEPS,
                n_paths=DEFAULT_N_PATHS, batch_size=DEFAULT_BATCH_SIZE,
@@ -185,10 +203,7 @@ def asian_call(S0, K, r, sigma, T, n_steps=DEFAULT_N_STEPS,
     return price, standard_error
 
 def asian_call_low_memory(S0, K, r, sigma, T, n_steps=DEFAULT_N_STEPS, n_paths=DEFAULT_N_PATHS_LARGE, seed=DEFAULT_SEED):
-    """Price an arithmetic average Asian call option one step at a time.
-
-    Holds O(n_paths) memory instead of O(n_paths * n_steps), at the cost of speed.
-    """
+    """Price an arithmetic average Asian call option with memory optimization but slower execution."""
     validate_inputs(S0=S0, K=K, sigma=sigma, T=T, n_paths=n_paths, n_steps=n_steps)
     rng = np.random.default_rng(seed)
     dt = T / n_steps
@@ -213,11 +228,7 @@ def asian_call_low_memory(S0, K, r, sigma, T, n_steps=DEFAULT_N_STEPS, n_paths=D
 def up_and_out_call(S0, K, B, r, sigma, T, n_steps=DEFAULT_N_STEPS,
                     n_paths=DEFAULT_N_PATHS, batch_size=DEFAULT_BATCH_SIZE,
                     seed=DEFAULT_SEED):
-    """Price an up-and-out barrier call option in path batches.
-
-    The barrier is checked at n_steps discrete dates, so the price depends on
-    n_steps and is NOT the continuously monitored barrier price. See README.
-    """
+    """Price an up-and-out barrier call option in path batches, checking the barrier once per step."""
     validate_inputs(S0=S0, K=K, B=B, sigma=sigma, T=T, n_paths=n_paths, n_steps=n_steps)
     rng = np.random.default_rng(seed)
     dt = T / n_steps
@@ -381,9 +392,7 @@ def monte_carlo_pricer(S0, K, r, sigma, T, n_paths=DEFAULT_N_PATHS, seed=DEFAULT
     """
     European call option pricer with antithetic sampling and control variates.
     Returns price, standard error, and 95% confidence interval.
-
-    The control variate beta is fitted on the same paths used to price, so the
-    reported standard error is mildly optimistic (~10% low at n_paths=100_000).
+    Beta is estimated from the same paths, so the standard error is slightly optimistic.
     """
     validate_inputs(S0=S0, K=K, sigma=sigma, T=T, n_paths=n_paths)
     rng = np.random.default_rng(seed)
