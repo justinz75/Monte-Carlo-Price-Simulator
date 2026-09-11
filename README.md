@@ -1,5 +1,7 @@
 # Monte Carlo Price Simulator
 
+[![CI](https://github.com/justinz75/Monte-Carlo-Price-Simulator/actions/workflows/ci.yml/badge.svg)](https://github.com/justinz75/Monte-Carlo-Price-Simulator/actions/workflows/ci.yml)
+
 Monte Carlo option pricing and portfolio risk in NumPy, benchmarked against closed-form
 Black-Scholes, then checked against the real market. Covers European, Asian and barrier
 options, correlated multi-asset portfolios, VaR/CVaR, two variance reduction techniques,
