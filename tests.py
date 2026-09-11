@@ -1,13 +1,19 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
+from pathlib import Path
 from constants import DEFAULT_N_PATHS, DEFAULT_N_PATHS_LARGE
 from main import (black_scholes_call, black_scholes_put, simulate_correlated_portfolio,
                   monte_carlo_var, convergence_plot, call_antithetic, call_control_variate,
                   simulate_gbm, up_and_out_call, asian_call, monte_carlo_pricer,
-                  european_call, european_put, implied_volatility)
+                  european_call, european_put, implied_volatility,
+                  black_scholes_delta, monte_carlo_delta)
 from volatility_smile import (drop_arbitrage_violations, implied_forward, out_of_the_money,
                               with_implied_vols)
+
+#folder the charts are saved to for the README
+PLOT_DIR = Path(__file__).parent / "plots"
+PLOT_DIR.mkdir(exist_ok=True)
 
 #parameters for GBM simulation
 S0 = 100  #initial stock price
@@ -31,6 +37,7 @@ plt.ylabel("Stock Price (£)")
 plt.title("Monte Carlo Stock Price Simulation - 50 of 10,000 Paths")
 plt.grid(True, alpha=0.3)
 plt.tight_layout()
+plt.savefig(PLOT_DIR / "gbm_paths.png", dpi=150)
 plt.show()
 
 #parameters for the European call option
@@ -114,6 +121,28 @@ for mispricing in (0.5, 2.0):
     assert dropped == {stale_row}, f"stale quote priced x{mispricing}: the filter dropped {dropped}"
 print("No-arbitrage filter: kept the clean chain whole and caught both planted stale quotes")
 
+#check the Black-Scholes delta against a finite difference of the Black-Scholes price
+bump = 0.01
+for option_type, pricer in (("call", black_scholes_call), ("put", black_scholes_put)):
+    finite_difference = (pricer(S0 + bump, K, r, sigma, T) - pricer(S0 - bump, K, r, sigma, T)) / (2 * bump)
+    exact_delta = black_scholes_delta(S0, K, r, sigma, T, option_type=option_type)
+    assert abs(finite_difference - exact_delta) < 1e-6, f"{option_type}: formula {exact_delta}, finite difference {finite_difference}"
+
+#call and put deltas should differ by exactly exp(-qT)
+delta_gap = (black_scholes_delta(S0, K, r, sigma, T, q=0.02)
+             - black_scholes_delta(S0, K, r, sigma, T, q=0.02, option_type="put"))
+assert abs(delta_gap - np.exp(-0.02 * T)) < 1e-12, "call and put deltas should differ by exp(-qT)"
+
+#compare the pathwise Monte Carlo delta with the Black-Scholes delta at a few strikes
+print("\nDelta, pathwise Monte Carlo against Black-Scholes:")
+for option_type in ("call", "put"):
+    for strike in (90, 100, 110):
+        mc_delta, mc_delta_standard_error = monte_carlo_delta(S0, strike, r, sigma, T, option_type=option_type)
+        exact_delta = black_scholes_delta(S0, strike, r, sigma, T, option_type=option_type)
+        print(f"  {option_type} K={strike}: {mc_delta:.4f} (Standard Error: {mc_delta_standard_error:.4f}), "
+              f"Black-Scholes {exact_delta:.4f}")
+        assert abs(mc_delta - exact_delta) < 4 * mc_delta_standard_error, f"{option_type} K={strike}: delta off by over 4 standard errors"
+
 # #parameters for the Asian call option
 asian_price, asian_standard_error = asian_call(S0=100, K=105, r=0.05, sigma=0.25, T=1.0)
 print(f"Asian call price: £{asian_price:.4f} (Standard Error: {asian_standard_error:.4f})")
@@ -138,6 +167,7 @@ plt.title("Monte Carlo P&L Distribution with VaR and CVaR")
 plt.legend()
 plt.grid(True, alpha=0.3)
 plt.tight_layout()
+plt.savefig(PLOT_DIR / "var_distribution.png", dpi=150)
 plt.show()
 
 #3 correlated assets
@@ -202,4 +232,4 @@ print("\nnote: methods that fit a control variate beta in-sample report a standa
 print("error roughly 10% below the spread actually seen across seeds.")
 
 #convergence plot for European call option pricing
-convergence_plot(S0, K, r, sigma, T)
+convergence_plot(S0, K, r, sigma, T, save_path=PLOT_DIR / "convergence.png")

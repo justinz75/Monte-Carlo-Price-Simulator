@@ -174,6 +174,39 @@ def implied_volatility(price, S0, K, r, T, q=0.0, option_type="call",
         return np.nan
     return optimize.brentq(pricing_error, sigma_low, sigma_high)
 
+def black_scholes_delta(S0, K, r, sigma, T, q=0.0, option_type="call"):
+    """Exact Black-Scholes delta for a European call or put, with an optional dividend yield q."""
+    validate_inputs(S0=S0, K=K, sigma=sigma, T=T)
+    d1 = (np.log(S0 / K) + (r - q + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+    if option_type == "call":
+        return np.exp(-q * T) * stats.norm.cdf(d1)
+    if option_type == "put":
+        return -np.exp(-q * T) * stats.norm.cdf(-d1)
+    raise ValueError(f"option_type must be 'call' or 'put', got {option_type!r}")
+
+def monte_carlo_delta(S0, K, r, sigma, T, option_type="call", n_paths=DEFAULT_N_PATHS_LARGE, seed=DEFAULT_SEED):
+    """European call or put delta using the pathwise method."""
+    validate_inputs(S0=S0, K=K, sigma=sigma, T=T, n_paths=n_paths)
+    if option_type not in ("call", "put"):
+        raise ValueError(f"option_type must be 'call' or 'put', got {option_type!r}")
+    rng = np.random.default_rng(seed)
+
+    #simulate terminal stock prices
+    Z = rng.standard_normal(n_paths, dtype=np.float32)
+    price_at_time = S0 * np.exp((r - 0.5 * sigma**2) * T + sigma * np.sqrt(T) * Z)
+
+    #pathwise delta: the payoff moves by S_T / S0 per unit of S0 on paths that end in the money
+    if option_type == "call":
+        path_deltas = np.where(price_at_time > K, price_at_time / S0, 0.0)
+    else:
+        path_deltas = np.where(price_at_time < K, -price_at_time / S0, 0.0)
+
+    discount = np.exp(-r * T)
+    delta = discount * path_deltas.mean(dtype=np.float64)
+    standard_error = discount * path_deltas.std(dtype=np.float64) / np.sqrt(n_paths)
+
+    return delta, standard_error
+
 def asian_call(S0, K, r, sigma, T, n_steps=DEFAULT_N_STEPS,
                n_paths=DEFAULT_N_PATHS, batch_size=DEFAULT_BATCH_SIZE,
                seed=DEFAULT_SEED):
@@ -353,7 +386,7 @@ def call_control_variate(S0, K, r, sigma, T, n_paths=DEFAULT_N_PATHS_LARGE, seed
     
     return price, standard_error
 
-def convergence_plot(S0, K, r, sigma, T, max_paths=200_000, seed=DEFAULT_SEED):
+def convergence_plot(S0, K, r, sigma, T, max_paths=200_000, seed=DEFAULT_SEED, save_path=None):
     """Show the convergence of the Monte Carlo estimate for a European call option price."""
     validate_inputs(S0=S0, K=K, sigma=sigma, T=T, n_paths=max_paths)
     rng = np.random.default_rng(seed)
@@ -386,6 +419,8 @@ def convergence_plot(S0, K, r, sigma, T, max_paths=200_000, seed=DEFAULT_SEED):
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
+    if save_path is not None:
+        plt.savefig(save_path, dpi=150)
     plt.show()
 
 def monte_carlo_pricer(S0, K, r, sigma, T, n_paths=DEFAULT_N_PATHS, seed=DEFAULT_SEED):
