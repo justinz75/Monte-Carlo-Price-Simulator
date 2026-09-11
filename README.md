@@ -3,7 +3,7 @@
 Monte Carlo option pricing and portfolio risk in NumPy, benchmarked against closed-form
 Black-Scholes, then checked against the real market. Covers European, Asian and barrier
 options, correlated multi-asset portfolios, VaR/CVaR, two variance reduction techniques,
-and an implied volatility solver run on live S&P 500 option prices.
+pathwise delta, and an implied volatility solver run on live S&P 500 option prices.
 
 ![Implied volatility of SPX options by strike: 58% for the deepest out-of-the-money puts, falling to 14.5% at the money, then turning back up for calls](plots/spx_smile_2026-09-10_2112_2026-10-30.png)
 
@@ -14,11 +14,11 @@ and an implied volatility solver run on live S&P 500 option prices.
 ```bash
 pip install -r requirements.txt
 python main.py               # prices one European call, with a 95% confidence interval
-python tests.py              # full demo: every pricer, the variance reduction table, and plots
+python tests.py              # full demo: every pricer and check, saving the charts to plots/
 python volatility_smile.py   # live SPX option chain to an implied volatility smile
 ```
 
-`tests.py` opens matplotlib windows. To run it without them:
+`tests.py` opens matplotlib windows and saves each chart to `plots/`. To skip the windows:
 
 ```bash
 MPLBACKEND=Agg python tests.py
@@ -37,6 +37,7 @@ regular-hours snapshot, run it between 09:30 and 20:15 New York.
 | European options | `european_call`, `european_put`, `european_call_batched`, `european_call_parallel` |
 | Closed form | `black_scholes_call`, `black_scholes_put`, both with an optional dividend yield `q` |
 | Implied volatility | `implied_volatility` (Brent's method) |
+| Greeks | `black_scholes_delta`, `monte_carlo_delta` (pathwise) |
 | Path-dependent | `asian_call`, `asian_call_low_memory`, `up_and_out_call` |
 | Risk | `monte_carlo_var` (VaR and CVaR) |
 | Variance reduction | `call_antithetic`, `call_control_variate`, `monte_carlo_pricer` |
@@ -46,6 +47,8 @@ regular-hours snapshot, run it between 09:30 and 20:15 New York.
 Paths are simulated in `float32` to halve memory traffic, but every sum, mean and
 variance accumulates in `float64` — `float32` accumulators lose meaningful precision
 over hundreds of thousands of paths.
+
+![50 of 10,000 simulated one-year price paths under geometric Brownian motion, starting at £100 and fanning out](plots/gbm_paths.png)
 
 ## Results
 
@@ -117,6 +120,16 @@ Black-Scholes volatility can't produce this shape at all.
 - `tests.py` runs the whole pipeline offline on a synthetic chain with a known forward and
   a known skew, and recovers both exactly.
 
+### Convergence to Black-Scholes
+
+![The Monte Carlo price of a European call converging on the Black-Scholes price as paths are added, inside a 95% confidence band that narrows](plots/convergence.png)
+
+European call, `S0=100, K=110, r=0.05, sigma=0.2, T=1.0`, the same one as below, priced
+with more and more paths. The Black-Scholes price stays inside the 95% confidence band at
+every checkpoint, and the band narrows from ±0.72 at 1,000 paths to ±0.05 at 200,000:
+200 times the paths for 14 times the precision. That 1/√n rate is what makes variance
+reduction worth having.
+
 ### Variance reduction
 
 European call, `S0=100, K=110, r=0.05, sigma=0.2, T=1.0`. Black-Scholes gives **£6.0401**.
@@ -137,6 +150,41 @@ Antithetic sampling alone is weak here because the call payoff is convex and thi
 is out of the money — one leg of most pairs contributes nothing. The control variate
 (terminal stock price, whose risk-neutral expectation `S0·exp(rT)` is known exactly)
 does most of the work, and the two compose well.
+
+### Delta
+
+Delta is how much an option's price moves per £1 move in the stock, and it is the number
+of shares a trader holds to hedge the option. `monte_carlo_delta` estimates it with the
+pathwise method: differentiate each path's payoff with respect to `S0`. For a call that
+is `exp(-rT) · S_T / S0` on paths that finish in the money and zero on the rest, so delta
+comes out of the same simulation as the price, with no bumping and re-pricing.
+
+`S0=100, r=0.05, sigma=0.2, T=1.0`, 100,000 paths:
+
+| option | strike | Monte Carlo delta | std error | Black-Scholes delta |
+| --- | ---: | ---: | ---: | ---: |
+| call | 90 | 0.8116 | 0.0015 | 0.8097 |
+| call | 100 | 0.6396 | 0.0018 | 0.6368 |
+| call | 110 | 0.4529 | 0.0019 | 0.4496 |
+| put | 90 | -0.1893 | 0.0010 | -0.1903 |
+| put | 100 | -0.3613 | 0.0013 | -0.3632 |
+| put | 110 | -0.5480 | 0.0014 | -0.5504 |
+
+Every estimate is within 2 standard errors of Black-Scholes. They all sit slightly above
+it because every strike reuses the same 100,000 paths, which happen to run a little high:
+the same draws price the call at £6.0906 against £6.0401 in the variance reduction table.
+
+The pathwise method needs the payoff to be continuous in `S_T`. That holds for calls and
+puts, but a digital option's payoff jumps at the strike, so its pathwise delta is zero on
+every path. Digitals need a likelihood-ratio or finite-difference estimator instead.
+
+### Value at Risk
+
+![Histogram of one-year profit and loss on a £100 stock, with the 95% VaR and CVaR marked in the left tail](plots/var_distribution.png)
+
+One-year profit and loss on a £100 stock with 5% drift and 25% volatility, from 100,000
+paths. The 95% VaR is £32.50: one year in twenty, the loss is at least that. The CVaR,
+the average loss across that worst 5%, is £38.94.
 
 ### Barrier monitoring frequency
 
@@ -188,7 +236,7 @@ continuously monitored price, and this function does not claim to be one.
   with path count — a far bigger win than any of the current optimisations.
 - A pytest suite replacing the demo script: MC within 3 standard errors of Black-Scholes,
   put-call parity, geometric Asian against its closed form, barrier ≤ vanilla.
-- Greeks: pathwise delta, and gamma by finite differences with common random numbers.
+- Gamma by finite differences with common random numbers, to go with the pathwise delta.
 - Collapse the six near-duplicate terminal-price samplers into one engine taking a
   payoff function, so variance reduction and QMC apply to every product.
 - Fit a model that can produce a skew, Merton jump-diffusion or Heston, and compare its
@@ -212,3 +260,7 @@ continuously monitored price, and this function does not claim to be one.
   skew goes through the same functions as the live data, and both come back exactly.
 - **The stale-quote filter**: it keeps a clean chain whole, and catches a planted stale
   quote whether it is too cheap or too dear.
+- **Delta**: the Black-Scholes delta matches a finite difference of the Black-Scholes
+  price to 1e-6, call and put deltas differ by exactly `exp(-qT)`, and the pathwise Monte
+  Carlo delta lands within 4 standard errors of Black-Scholes for calls and puts at three
+  strikes.
