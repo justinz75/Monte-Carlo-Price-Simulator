@@ -1,15 +1,21 @@
 # Monte Carlo Price Simulator
 
 Monte Carlo option pricing and portfolio risk in NumPy, benchmarked against closed-form
-Black-Scholes. Covers European, Asian and barrier options, correlated multi-asset
-portfolios, VaR/CVaR, and two variance reduction techniques.
+Black-Scholes, then checked against the real market. Covers European, Asian and barrier
+options, correlated multi-asset portfolios, VaR/CVaR, two variance reduction techniques,
+and an implied volatility solver run on live S&P 500 option prices.
+
+![Implied volatility of SPX options by strike: 58% for the deepest out-of-the-money puts, falling to 14.5% at the money, then turning back up for calls](plots/spx_smile_2026-09-10_2112_2026-10-30.png)
+
+*Black-Scholes says this should be a flat line. It isn't. See [the volatility smile](#the-volatility-smile).*
 
 ## Running it
 
 ```bash
 pip install -r requirements.txt
-python main.py     # prices one European call, with a 95% confidence interval
-python tests.py    # full demo: every pricer, the variance reduction table, and plots
+python main.py               # prices one European call, with a 95% confidence interval
+python tests.py              # full demo: every pricer, the variance reduction table, and plots
+python volatility_smile.py   # live SPX option chain to an implied volatility smile
 ```
 
 `tests.py` opens matplotlib windows. To run it without them:
@@ -18,23 +24,98 @@ python tests.py    # full demo: every pricer, the variance reduction table, and 
 MPLBACKEND=Agg python tests.py
 ```
 
+`volatility_smile.py` needs an internet connection; `tests.py` does not. The smile script
+picks the most liquid expiry near 50 days out (`--days 90` or `--expiry 2026-12-31` to
+change it) and saves the chart and its data to `plots/`, named by the quote time. For a
+regular-hours snapshot, run it between 09:30 and 20:15 New York.
+
 ## What's implemented
 
 | Area | Functions |
 | --- | --- |
 | Path simulation | `simulate_gbm`, `simulate_correlated_portfolio` (Cholesky-correlated assets) |
 | European options | `european_call`, `european_put`, `european_call_batched`, `european_call_parallel` |
-| Closed form | `black_scholes_call`, `black_scholes_put` |
+| Closed form | `black_scholes_call`, `black_scholes_put`, both with an optional dividend yield `q` |
+| Implied volatility | `implied_volatility` (Brent's method) |
 | Path-dependent | `asian_call`, `asian_call_low_memory`, `up_and_out_call` |
 | Risk | `monte_carlo_var` (VaR and CVaR) |
 | Variance reduction | `call_antithetic`, `call_control_variate`, `monte_carlo_pricer` |
 | Diagnostics | `convergence_plot` |
+| Live market data | `volatility_smile.py`: SPX option chain to implied volatility smile |
 
 Paths are simulated in `float32` to halve memory traffic, but every sum, mean and
 variance accumulates in `float64` — `float32` accumulators lose meaningful precision
 over hundreds of thousands of paths.
 
 ## Results
+
+### The volatility smile
+
+Everything else in this project assumes Black-Scholes, where volatility is a property
+of the underlying: one number, the same at every strike. `volatility_smile.py` tests that
+against the market. It pulls the live SPX option chain, works out the volatility each
+option's price implies, and plots it by strike (the chart at the top).
+
+SPX options expiring 30 Oct 2026 (50 days), quoted at 21:12 New York on 10 Sep 2026, in
+Cboe's overnight session:
+
+| strike, as % of the forward | implied volatility |
+| ---: | ---: |
+| 80% | 33.2% |
+| 90% | 23.4% |
+| 95% | 18.8% |
+| 100% (at the money) | 14.5% |
+| 105% | 11.8% |
+
+It is nowhere near flat. A put struck 20% below the forward is priced at more than twice
+the at-the-money volatility. This is the skew, and there are two standard explanations
+for it: investors buy puts as portfolio insurance, and volatility tends to jump when the
+market falls, which makes big drops more likely than a lognormal model allows. A single
+Black-Scholes volatility can't produce this shape at all.
+
+**How the vols are computed**
+
+- **SPX rather than SPY.** SPX options are European-style, so Black-Scholes applies
+  exactly. SPY options are American and carry an early exercise premium.
+- **One contract type.** On monthly dates the chain lists both AM-settled and PM-settled
+  contracts, which expire hours apart. Only the PM-settled SPXW contracts are used.
+- **Out-of-the-money options only.** Their price is all time value. An in-the-money price
+  is mostly intrinsic value, so a small quoting error becomes a large volatility error.
+- **Mid prices, from two-sided quotes** with a spread under 25% of the mid.
+- **The forward comes from the options, not the index.** Put-call parity,
+  `C - P = exp(-rT)(F - K)`, gives the forward straight from call and put prices. That
+  takes care of dividends without looking them up.
+- **Brent's method rather than Newton-Raphson.** Newton can diverge far from the money,
+  where vega is close to zero. Brent always converges once the answer is bracketed.
+
+**Three problems in the live data, and how they were caught**
+
+1. **A negative dividend yield.** On the first run, from the closing quotes, backing a
+   dividend yield out of the index level and the forward gave -0.37%, which the S&P 500
+   can't have. The cause was timing: the index closes at 16:00 but SPX options quote
+   until 16:15, and S&P futures rose 0.10% in that window (7,598.00 to 7,605.75).
+   Adjusting for the move makes the yield positive. This is why every vol is anchored
+   to the options' own forward rather than to the index close.
+2. **Stale quotes that implied free money.** On the same run, four puts sat well below the
+   curve. Each was priced *below* the put one strike lower: the 6865 put at 22.80 against
+   33.10 for the 6860. A higher-strike put can never be worth less, so you could buy it,
+   sell the other, and keep the difference with no risk. None of the four had traded
+   since 3-5 August. The script now drops quotes that break this ordering.
+3. **Quotes that moved with no trades.** A rerun at 21:04 New York gave a different forward
+   from the same chain, though nothing had traded since 16:14. SPX options also trade in
+   an overnight session on Cboe while the index is shut, and the quotes had followed S&P
+   futures up another 0.09% (7,605.75 at 16:14 to 7,612.75 at 20:58). The script now
+   spots the overnight session, values the options at the time they were fetched, and
+   puts the time in the file name so one snapshot can't overwrite another. The chart at
+   the top is one of those overnight snapshots.
+
+**Checks on the result**
+
+- Put-call parity means a call and a put at the same strike must imply the same
+  volatility. With the options' forward they agree to a median 0.01 vol points. Price
+  them off the index close with no dividends instead and they disagree by 1.29.
+- `tests.py` runs the whole pipeline offline on a synthetic chain with a known forward and
+  a known skew, and recovers both exactly.
 
 ### Variance reduction
 
@@ -84,7 +165,17 @@ continuously monitored price, and this function does not claim to be one.
   40 seeds at 100,000 paths, `monte_carlo_pricer` reports a standard error about 10%
   below the spread actually observed (0.00497 reported vs 0.00558 realised). The prices
   themselves show no detectable bias. Fitting beta on a held-out pilot batch would fix it.
-- **GBM only** — constant volatility, no jumps, no stochastic vol.
+- **GBM only** — constant volatility, no jumps, no stochastic vol. The volatility smile
+  above is the market's evidence that this matters.
+- **The smile is one snapshot of free Yahoo Finance data**, built from mid prices rather
+  than prices you could trade at, and the one above is from the overnight session.
+  Rerunning at another time gives a different chart.
+- **The overnight session hours are hard-coded**, roughly 20:15 to 09:15 New York, and
+  exchange holidays are ignored.
+- **The stale-quote filter assumes stale quotes are isolated.** Deep in-the-money SPX
+  quotes on Yahoo are often stale in runs (some last traded in May), which fools a check
+  that judges each quote by its neighbours. So the filter only sees the out-of-the-money
+  quotes the smile is built from; the forward and the call-put check use medians instead.
 - **`european_call_parallel` is unbenchmarked** and seeds workers with `seed + worker_id`,
   which does not guarantee independent streams. `np.random.SeedSequence(seed).spawn(n)`
   is the correct approach. It also ships full payoff arrays back through pickle rather
@@ -100,12 +191,24 @@ continuously monitored price, and this function does not claim to be one.
 - Greeks: pathwise delta, and gamma by finite differences with common random numbers.
 - Collapse the six near-duplicate terminal-price samplers into one engine taking a
   payoff function, so variance reduction and QMC apply to every product.
+- Fit a model that can produce a skew, Merton jump-diffusion or Heston, and compare its
+  smile against the market's.
+- Plot several expiries on one chart to see how the skew changes with maturity.
 
 ## Correctness checks
 
-`tests.py` asserts put-call parity in two places:
+`tests.py` asserts:
 
-- **Black-Scholes**: `C - P = S0 - K·exp(-rT)` holds to ~1e-15.
-- **Monte Carlo**: the call and put share a seed, so the only parity error is the
-  sampling error in the mean terminal price. The tolerance is derived from that
-  quantity rather than picked by hand.
+- **Put-call parity, Black-Scholes**: `C - P = S0 - K·exp(-rT)` holds to ~1e-15.
+- **Put-call parity, Monte Carlo**: the call and put share a seed, so the only parity
+  error is the sampling error in the mean terminal price. The tolerance is derived from
+  that quantity rather than picked by hand.
+- **Dividend yield**: pricing with a yield `q` matches pricing from a spot reduced by the
+  dividends paid, `S0·exp(-qT)`, to 1e-10. That tests the `q` terms against the `q = 0`
+  formula instead of against themselves.
+- **Implied volatility**: 18 options priced at known volatilities are all recovered to
+  within 1e-6, and an impossible price returns `nan`.
+- **The smile pipeline, offline**: a synthetic chain with a known forward and a known
+  skew goes through the same functions as the live data, and both come back exactly.
+- **The stale-quote filter**: it keeps a clean chain whole, and catches a planted stale
+  quote whether it is too cheap or too dear.
