@@ -11,6 +11,24 @@ pathwise delta, and an implied volatility solver run on live S&P 500 option pric
 
 *Black-Scholes says this should be a flat line. It isn't. See [the volatility smile](#the-volatility-smile).*
 
+## Highlights
+
+- **Standard error cut by 80.9% at a fixed budget** by combining antithetic sampling with a
+  control variate. Plain Monte Carlo would need about 27.5 times as many paths to match it.
+  See [Variance reduction](#variance-reduction).
+- **An implied volatility smile from live SPX options**, from 58% for the deepest
+  out-of-the-money puts to 14.5% at the money, after tracking down two problems in the
+  data: options still quoting after the index close, and stale quotes that implied free
+  money. See [The volatility smile](#the-volatility-smile).
+- **Pathwise delta within 2 standard errors of Black-Scholes** for calls and puts at three
+  strikes. See [Delta](#delta).
+- **Barrier prices that move 19% with monitoring frequency**, roughly 35 standard errors,
+  which is discretization bias rather than noise. See
+  [Barrier monitoring frequency](#barrier-monitoring-frequency).
+- **Checked on every push**: put-call parity to ~1e-15, implied volatilities recovered to
+  1e-6, and the smile pipeline run offline on a synthetic chain, all in GitHub Actions.
+  See [Correctness checks](#correctness-checks).
+
 ## Running it
 
 ```bash
